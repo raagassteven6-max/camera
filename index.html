@@ -100,7 +100,7 @@ let tracks = [];
 let nextTrackId = 1;
 
 const IOU_MATCH_THRESHOLD = 0.3;
-const MAX_LOST_FRAMES = 15;
+const MAX_LOST_FRAMES = 30;
 const MIN_SCORE = 0.5;
 
 // --- fps counter ---
@@ -190,19 +190,22 @@ function updateTracks(detections, ranFace) {
 function drawTracks() {
     overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
     tracks.forEach((t) => {
-        if (t.lastSeen > 0) return;
         const [x, y, w, h] = toCanvasRect(t.box);
         const color = t.class === 'face' ? '#FF3D9A' : '#00E5FF';
         overlayCtx.strokeStyle = color;
         overlayCtx.lineWidth = 2;
+        overlayCtx.setLineDash(t.lastSeen > 0 ? [6, 4] : []); // dashed = coasting on last known position
         overlayCtx.strokeRect(x, y, w, h);
+        overlayCtx.setLineDash([]);
         const label = `${t.class} #${t.id} ${(t.score * 100).toFixed(0)}%`;
         overlayCtx.font = '13px -apple-system, sans-serif';
         const textW = overlayCtx.measureText(label).width;
         overlayCtx.fillStyle = color;
+        overlayCtx.globalAlpha = t.lastSeen > 0 ? 0.55 : 1;
         overlayCtx.fillRect(x, Math.max(0, y - 18), textW + 10, 18);
         overlayCtx.fillStyle = '#000';
         overlayCtx.fillText(label, x + 5, Math.max(12, y - 5));
+        overlayCtx.globalAlpha = 1;
     });
 }
 
@@ -220,6 +223,7 @@ async function detectLoop() {
     const detections = [];
     const runFace = frameCount % 2 === 1;
     frameCount++;
+    const inferenceStart = performance.now();
 
     try {
         if (!runFace) {
@@ -247,6 +251,9 @@ async function detectLoop() {
                 });
             });
         }
+
+        const inferenceMs = (performance.now() - inferenceStart).toFixed(0);
+        statusEl.textContent = `Live — ${runFace ? 'face' : 'object'} model: ${inferenceMs}ms`;
 
         updateTracks(detections, runFace);
         drawTracks();
@@ -295,7 +302,7 @@ async function start() {
     statusEl.textContent = 'Starting camera…';
 
     const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
         audio: false
     });
     video.srcObject = stream;
