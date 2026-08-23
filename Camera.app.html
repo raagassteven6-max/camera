@@ -1,0 +1,1094 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Jaune vs Viola — Swarm Learning Sandbox</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0a0f;
+            color: #ccc;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            overflow: hidden;
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        #arena {
+            display: block;
+            margin: 0 auto;
+            border: 2px solid #333;
+            background: #0d0d14;
+        }
+        #ui {
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            padding: 8px 12px;
+            background: rgba(10,10,15,0.92);
+            backdrop-filter: blur(4px);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 6px;
+            z-index: 10;
+            font-size: 11px;
+            border-bottom: 1px solid #222;
+        }
+        .stat-group {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+        .stat {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 50px;
+        }
+        .stat-label { font-size: 9px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
+        .stat-value { font-size: 13px; font-weight: 700; }
+        .jaune { color: #f0c040; }
+        .viola { color: #a040f0; }
+        .neutral { color: #888; }
+        .btn {
+            background: #1a1a2e;
+            border: 1px solid #333;
+            color: #aaa;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .btn:hover { background: #252540; border-color: #555; }
+        .btn:active { background: #303060; }
+        .btn.active { background: #1a3a1a; border-color: #3a6a3a; color: #7a7; }
+        #controls {
+            position: fixed;
+            bottom: 0; left: 0; right: 0;
+            padding: 8px 12px;
+            background: rgba(10,10,15,0.92);
+            backdrop-filter: blur(4px);
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            z-index: 10;
+            border-top: 1px solid #222;
+        }
+        #overlay {
+            position: fixed;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(10,10,20,0.95);
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            z-index: 100;
+            display: none;
+            max-width: 90vw;
+        }
+        #overlay h2 { margin-bottom: 12px; font-size: 16px; }
+        #overlay p { font-size: 12px; color: #888; margin-bottom: 8px; line-height: 1.5; }
+        .progress-bar {
+            width: 200px;
+            height: 4px;
+            background: #222;
+            border-radius: 2px;
+            margin: 8px auto;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #f0c040, #a040f0);
+            transition: width 0.3s;
+        }
+        #graphCanvas {
+            position: fixed;
+            bottom: 50px;
+            right: 8px;
+            width: 200px;
+            height: 80px;
+            background: rgba(10,10,15,0.8);
+            border: 1px solid #222;
+            border-radius: 4px;
+            z-index: 5;
+        }
+        @media (max-width: 480px) {
+            #ui { font-size: 9px; padding: 4px 8px; }
+            .stat-value { font-size: 11px; }
+            .btn { padding: 4px 8px; font-size: 10px; }
+            #graphCanvas { width: 140px; height: 60px; }
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div class="stat-group">
+            <div class="stat"><span class="stat-label">Jaune</span><span class="stat-value jaune" id="jScore">0</span></div>
+            <div class="stat"><span class="stat-label">vs</span><span class="stat-value neutral" id="round">1</span></div>
+            <div class="stat"><span class="stat-label">Viola</span><span class="stat-value viola" id="vScore">0</span></div>
+        </div>
+        <div class="stat-group">
+            <div class="stat"><span class="stat-label">Gen</span><span class="stat-value neutral" id="gen">1</span></div>
+            <div class="stat"><span class="stat-label">FPS</span><span class="stat-value neutral" id="fps">60</span></div>
+            <div class="stat"><span class="stat-label">Speed</span><span class="stat-value neutral" id="speed">1x</span></div>
+        </div>
+        <div class="stat-group">
+            <button class="btn" id="btnTrain" onclick="toggleTraining()">Start Training</button>
+            <button class="btn" id="btnVis" onclick="toggleVis()">Visuals: ON</button>
+            <button class="btn" id="btnSpeed" onclick="cycleSpeed()">Speed</button>
+        </div>
+    </div>
+
+    <canvas id="arena"></canvas>
+    <canvas id="graphCanvas"></canvas>
+
+    <div id="controls">
+        <button class="btn" onclick="resetBattle()">Reset Battle</button>
+        <button class="btn" onclick="saveModels()">Save Models</button>
+        <button class="btn" onclick="loadModels()">Load Models</button>
+        <button class="btn" onclick="toggleDebug()">Debug</button>
+        <button class="btn" onclick="toggleSynthetic()">Synthetic: OFF</button>
+    </div>
+
+    <div id="overlay">
+        <h2 id="overlayTitle">Training...</h2>
+        <p id="overlayText">Initializing neural networks...</p>
+        <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+    </div>
+
+<script>
+// ==================== CONFIG ====================
+const CONFIG = {
+    ARENA_W: 600, ARENA_H: 400,
+    AGENT_RADIUS: 10,
+    PROJ_RADIUS: 2.5,
+    PROJ_SPEED: 6,
+    PROJ_LIFESPAN: 90,
+    COOLDOWN: 18,
+    AGENT_SPEED: 2.8,
+    ACCEL: 0.35,
+    FRICTION: 0.88,
+    MAX_PROJ: 40,
+    HIT_REWARD: 10,
+    DAMAGE_PENALTY: -8,
+    SURVIVE_REWARD: 0.02,
+    WASTED_SHOT: -0.3,
+    BOUNDARY_PENALTY: -0.5,
+    IDLE_PENALTY: -0.05,
+    NN_INPUT: 14,
+    NN_HIDDEN: 8,
+    NN_OUTPUT: 5,
+    MUTATION_RATE: 0.15,
+    MUTATION_STRENGTH: 0.3,
+    ELITE_RATIO: 0.2,
+    POP_SIZE: 12,
+    SYNTHETIC_EPISODES: 30,
+    SELFPLAY_EPISODES: 50,
+    WIN_THRESHOLD: 3,
+};
+
+// ==================== NEURAL NET (Tiny MLP) ====================
+class TinyMLP {
+    constructor(inputSize, hiddenSize, outputSize, weights = null) {
+        this.i = inputSize; this.h = hiddenSize; this.o = outputSize;
+        this.w1 = new Float32Array(this.i * this.h);
+        this.b1 = new Float32Array(this.h);
+        this.w2 = new Float32Array(this.h * this.o);
+        this.b2 = new Float32Array(this.o);
+        if (weights) {
+            this.deserialize(weights);
+        } else {
+            this.randomize();
+        }
+    }
+    randomize() {
+        const s = Math.sqrt(2.0 / this.i);
+        for (let i = 0; i < this.w1.length; i++) this.w1[i] = (Math.random() - 0.5) * 2 * s;
+        for (let i = 0; i < this.b1.length; i++) this.b1[i] = 0;
+        const s2 = Math.sqrt(2.0 / this.h);
+        for (let i = 0; i < this.w2.length; i++) this.w2[i] = (Math.random() - 0.5) * 2 * s2;
+        for (let i = 0; i < this.b2.length; i++) this.b2[i] = 0;
+    }
+    forward(input) {
+        const hidden = new Float32Array(this.h);
+        for (let j = 0; j < this.h; j++) {
+            let sum = this.b1[j];
+            for (let i = 0; i < this.i; i++) sum += input[i] * this.w1[i * this.h + j];
+            hidden[j] = Math.max(0, sum); // ReLU
+        }
+        const out = new Float32Array(this.o);
+        for (let k = 0; k < this.o; k++) {
+            let sum = this.b2[k];
+            for (let j = 0; j < this.h; j++) sum += hidden[j] * this.w2[j * this.o + k];
+            out[k] = sum;
+        }
+        // Softmax for moveX, moveY; sigmoid for shoot, aim
+        const exp0 = Math.exp(out[0]);
+        const exp1 = Math.exp(out[1]);
+        const sum = exp0 + exp1 + 1e-8;
+        return [
+            exp0 / sum * 2 - 1,  // moveX: -1 to 1
+            exp1 / sum * 2 - 1,  // moveY: -1 to 1
+            1 / (1 + Math.exp(-out[2])), // shoot: 0 to 1
+            out[3], // aimX
+            out[4]  // aimY
+        ];
+    }
+    serialize() {
+        const total = this.w1.length + this.b1.length + this.w2.length + this.b2.length;
+        const arr = new Float32Array(total);
+        let idx = 0;
+        for (let i = 0; i < this.w1.length; i++) arr[idx++] = this.w1[i];
+        for (let i = 0; i < this.b1.length; i++) arr[idx++] = this.b1[i];
+        for (let i = 0; i < this.w2.length; i++) arr[idx++] = this.w2[i];
+        for (let i = 0; i < this.b2.length; i++) arr[idx++] = this.b2[i];
+        return arr;
+    }
+    deserialize(arr) {
+        let idx = 0;
+        for (let i = 0; i < this.w1.length; i++) this.w1[i] = arr[idx++];
+        for (let i = 0; i < this.b1.length; i++) this.b1[i] = arr[idx++];
+        for (let i = 0; i < this.w2.length; i++) this.w2[i] = arr[idx++];
+        for (let i = 0; i < this.b2.length; i++) this.b2[i] = arr[idx++];
+    }
+    clone() {
+        const m = new TinyMLP(this.i, this.h, this.o);
+        m.w1.set(this.w1);
+        m.b1.set(this.b1);
+        m.w2.set(this.w2);
+        m.b2.set(this.b2);
+        return m;
+    }
+    mutate(rate, strength) {
+        const mutate = (arr) => {
+            for (let i = 0; i < arr.length; i++) {
+                if (Math.random() < rate) {
+                    arr[i] += (Math.random() - 0.5) * strength;
+                    if (Math.random() < 0.05) arr[i] *= 0.5; // occasional reset
+                }
+            }
+        };
+        mutate(this.w1); mutate(this.b1);
+        mutate(this.w2); mutate(this.b2);
+    }
+}
+
+// ==================== PROJECTILE POOL ====================
+class ProjectilePool {
+    constructor(max) {
+        this.max = max;
+        this.pool = [];
+        this.active = [];
+        for (let i = 0; i < max; i++) {
+            this.pool.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, owner: null, active: false });
+        }
+    }
+    spawn(x, y, vx, vy, owner) {
+        for (let p of this.pool) {
+            if (!p.active) {
+                p.x = x; p.y = y; p.vx = vx; p.vy = vy;
+                p.life = CONFIG.PROJ_LIFESPAN; p.owner = owner; p.active = true;
+                this.active.push(p);
+                return p;
+            }
+        }
+        return null;
+    }
+    update() {
+        for (let i = this.active.length - 1; i >= 0; i--) {
+            const p = this.active[i];
+            p.x += p.vx; p.y += p.vy; p.life--;
+            if (p.life <= 0 || p.x < 0 || p.x > CONFIG.ARENA_W || p.y < 0 || p.y > CONFIG.ARENA_H) {
+                p.active = false;
+                this.active.splice(i, 1);
+            }
+        }
+    }
+    reset() {
+        for (let p of this.pool) p.active = false;
+        this.active.length = 0;
+    }
+}
+
+// ==================== AGENT ====================
+class Agent {
+    constructor(name, color, x, side) {
+        this.name = name;
+        this.color = color;
+        this.x = x; this.y = CONFIG.ARENA_H / 2;
+        this.vx = 0; this.vy = 0;
+        this.aimX = side === 'left' ? 1 : -1;
+        this.aimY = 0;
+        this.cooldown = 0;
+        this.side = side;
+        this.hp = 100;
+        this.maxHp = 100;
+        this.hits = 0;
+        this.shots = 0;
+        this.hitsTaken = 0;
+        this.reward = 0;
+        this.nn = null;
+        this.fitness = 0;
+        this.alive = true;
+        this.predictionX = 0;
+        this.predictionY = 0;
+        this.confidence = 0;
+        this.trail = [];
+    }
+    reset(x) {
+        this.x = x; this.y = CONFIG.ARENA_H / 2;
+        this.vx = 0; this.vy = 0;
+        this.cooldown = 0;
+        this.hp = this.maxHp;
+        this.hits = 0; this.shots = 0; this.hitsTaken = 0;
+        this.reward = 0; this.alive = true;
+        this.trail = [];
+    }
+    observe(enemy, projectiles, arenaW, arenaH) {
+        // Normalize all inputs to [-1, 1] or [0, 1]
+        const dx = enemy.x - this.x;
+        const dy = enemy.y - this.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) + 1e-6;
+
+        // Find nearest enemy projectile
+        let nearestProj = null, nearestDist = Infinity;
+        for (let p of projectiles) {
+            if (p.owner !== this && p.active) {
+                const d = Math.sqrt((p.x - this.x) ** 2 + (p.y - this.y) ** 2);
+                if (d < nearestDist) { nearestDist = d; nearestProj = p; }
+            }
+        }
+
+        // Danger estimate: projectiles heading toward us
+        let danger = 0;
+        if (nearestProj) {
+            const pdx = nearestProj.x - this.x;
+            const pdy = nearestProj.y - this.y;
+            const pdot = pdx * nearestProj.vx + pdy * nearestProj.vy;
+            danger = Math.max(0, -pdot / (dist + 50));
+        }
+
+        // Prediction: where enemy will be in 10 frames
+        this.predictionX = enemy.x + enemy.vx * 10;
+        this.predictionY = enemy.y + enemy.vy * 10;
+        this.confidence = 1 / (1 + Math.abs(enemy.vx) + Math.abs(enemy.vy));
+
+        const obs = new Float32Array(CONFIG.NN_INPUT);
+        obs[0] = this.x / arenaW * 2 - 1;
+        obs[1] = this.y / arenaH * 2 - 1;
+        obs[2] = this.vx / CONFIG.AGENT_SPEED;
+        obs[3] = this.vy / CONFIG.AGENT_SPEED;
+        obs[4] = dx / arenaW;
+        obs[5] = dy / arenaH;
+        obs[6] = dist / Math.sqrt(arenaW * arenaW + arenaH * arenaH);
+        obs[7] = enemy.vx / CONFIG.AGENT_SPEED;
+        obs[8] = enemy.vy / CONFIG.AGENT_SPEED;
+        obs[9] = nearestProj ? (nearestProj.x - this.x) / arenaW : 0;
+        obs[10] = nearestProj ? (nearestProj.y - this.y) / arenaH : 0;
+        obs[11] = nearestProj ? nearestProj.vx / CONFIG.PROJ_SPEED : 0;
+        obs[12] = nearestProj ? nearestProj.vy / CONFIG.PROJ_SPEED : 0;
+        obs[13] = Math.min(1, danger);
+
+        return obs;
+    }
+    act(obs, projectiles, enemy) {
+        if (!this.nn) return;
+        const out = this.nn.forward(obs);
+
+        // Movement
+        this.vx += out[0] * CONFIG.ACCEL;
+        this.vy += out[1] * CONFIG.ACCEL;
+        const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+        if (speed > CONFIG.AGENT_SPEED) {
+            this.vx = (this.vx / speed) * CONFIG.AGENT_SPEED;
+            this.vy = (this.vy / speed) * CONFIG.AGENT_SPEED;
+        }
+        this.vx *= CONFIG.FRICTION;
+        this.vy *= CONFIG.FRICTION;
+
+        // Boundary constraints
+        const half = CONFIG.ARENA_W / 2;
+        if (this.side === 'left') {
+            if (this.x < this.radius) { this.x = this.radius; this.vx *= -0.5; this.reward += CONFIG.BOUNDARY_PENALTY; }
+            if (this.x > half - this.radius) { this.x = half - this.radius; this.vx *= -0.5; this.reward += CONFIG.BOUNDARY_PENALTY; }
+        } else {
+            if (this.x < half + this.radius) { this.x = half + this.radius; this.vx *= -0.5; this.reward += CONFIG.BOUNDARY_PENALTY; }
+            if (this.x > CONFIG.ARENA_W - this.radius) { this.x = CONFIG.ARENA_W - this.radius; this.vx *= -0.5; this.reward += CONFIG.BOUNDARY_PENALTY; }
+        }
+        if (this.y < this.radius) { this.y = this.radius; this.vy *= -0.5; this.reward += CONFIG.BOUNDARY_PENALTY; }
+        if (this.y > CONFIG.ARENA_H - this.radius) { this.y = CONFIG.ARENA_H - this.radius; this.vy *= -0.5; this.reward += CONFIG.BOUNDARY_PENALTY; }
+
+        this.x += this.vx;
+        this.y += this.vy;
+
+        // Trail
+        if (frameCount % 3 === 0) {
+            this.trail.push({ x: this.x, y: this.y, alpha: 1 });
+            if (this.trail.length > 15) this.trail.shift();
+        }
+        for (let t of this.trail) t.alpha *= 0.92;
+
+        // Aim: predict enemy movement
+        const targetX = this.predictionX;
+        const targetY = this.predictionY;
+        const aimDx = targetX - this.x;
+        const aimDy = targetY - this.y;
+        const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) + 1e-6;
+        this.aimX = aimDx / aimDist;
+        this.aimY = aimDy / aimDist;
+
+        // Shoot
+        if (out[2] > 0.55 && this.cooldown <= 0) {
+            const projVx = this.aimX * CONFIG.PROJ_SPEED;
+            const projVy = this.aimY * CONFIG.PROJ_SPEED;
+            projectiles.spawn(this.x + this.aimX * (this.radius + 4), 
+                             this.y + this.aimY * (this.radius + 4), 
+                             projVx, projVy, this);
+            this.cooldown = CONFIG.COOLDOWN;
+            this.shots++;
+            this.reward += CONFIG.WASTED_SHOT; // penalize until hit
+        }
+        if (this.cooldown > 0) this.cooldown--;
+
+        // Survival reward
+        if (this.alive) this.reward += CONFIG.SURVIVE_REWARD;
+
+        // Idle penalty
+        if (Math.abs(this.vx) < 0.1 && Math.abs(this.vy) < 0.1) {
+            this.reward += CONFIG.IDLE_PENALTY;
+        }
+    }
+    takeHit(dmg) {
+        this.hp -= dmg;
+        this.hitsTaken++;
+        this.reward += CONFIG.DAMAGE_PENALTY;
+        if (this.hp <= 0) {
+            this.hp = 0;
+            this.alive = false;
+        }
+    }
+    get radius() { return CONFIG.AGENT_RADIUS; }
+}
+
+// ==================== SYNTHETIC TARGETS ====================
+class SyntheticTarget {
+    constructor(type, arenaW, arenaH) {
+        this.type = type;
+        this.x = arenaW * 0.75;
+        this.y = arenaH / 2;
+        this.vx = 0; this.vy = 0;
+        this.t = 0;
+        this.radius = CONFIG.AGENT_RADIUS;
+        this.alive = true;
+        this.hp = 100;
+        this.hitsTaken = 0;
+    }
+    update() {
+        this.t++;
+        const w = CONFIG.ARENA_W, h = CONFIG.ARENA_H;
+        switch (this.type) {
+            case 'stationary': break;
+            case 'moving': this.x = w * 0.75 + Math.sin(this.t * 0.02) * 80; break;
+            case 'random': 
+                if (this.t % 40 === 0) { this.vx = (Math.random() - 0.5) * 3; this.vy = (Math.random() - 0.5) * 3; }
+                break;
+            case 'circling':
+                this.x = w * 0.75 + Math.cos(this.t * 0.03) * 60;
+                this.y = h / 2 + Math.sin(this.t * 0.03) * 60;
+                break;
+            case 'zigzag':
+                this.y = h / 2 + Math.sin(this.t * 0.08) * (h * 0.35);
+                break;
+            case 'fast':
+                this.x = w * 0.75 + Math.sin(this.t * 0.06) * 100;
+                this.y = h / 2 + Math.cos(this.t * 0.05) * 60;
+                break;
+            case 'slow':
+                this.x = w * 0.75 + Math.sin(this.t * 0.008) * 40;
+                break;
+            case 'dodge':
+                if (this.t % 25 === 0) this.vy = (Math.random() - 0.5) * 5;
+                this.vy *= 0.9;
+                break;
+            case 'boundary':
+                this.y = h * 0.1 + Math.abs(Math.sin(this.t * 0.02)) * (h * 0.8);
+                break;
+        }
+        this.x += this.vx; this.y += this.vy;
+        this.x = Math.max(this.radius, Math.min(w - this.radius, this.x));
+        this.y = Math.max(this.radius, Math.min(h - this.radius, this.y));
+    }
+    takeHit(dmg) {
+        this.hp -= dmg;
+        this.hitsTaken++;
+        if (this.hp <= 0) this.alive = false;
+    }
+}
+
+// ==================== SIMULATION ====================
+let canvas, ctx, graphCanvas, graphCtx;
+let jaune, viola, projectiles;
+let frameCount = 0;
+let lastTime = 0;
+let fps = 60;
+let simSpeed = 1;
+let speedLevels = [1, 5, 15, 30, 0];
+let speedIdx = 0;
+let visualsOn = true;
+let debugOn = false;
+let syntheticMode = false;
+let training = false;
+let generation = 1;
+let round = 1;
+let jWins = 0, vWins = 0;
+let jPopulation = [], vPopulation = [];
+let jIdx = 0, vIdx = 0;
+let battleFrames = 0;
+let maxBattleFrames = 3000;
+let syntheticTarget = null;
+let syntheticEpisode = 0;
+let selfPlayEpisode = 0;
+let history = { jaune: [], viola: [], generations: [] };
+let paused = false;
+
+function init() {
+    canvas = document.getElementById('arena');
+    ctx = canvas.getContext('2d', { alpha: false });
+    graphCanvas = document.getElementById('graphCanvas');
+    graphCtx = graphCanvas.getContext('2d');
+    resize();
+    window.addEventListener('resize', resize);
+
+    projectiles = new ProjectilePool(CONFIG.MAX_PROJ);
+
+    // Initialize populations
+    for (let i = 0; i < CONFIG.POP_SIZE; i++) {
+        jPopulation.push({ nn: new TinyMLP(CONFIG.NN_INPUT, CONFIG.NN_HIDDEN, CONFIG.NN_OUTPUT), fitness: 0, wins: 0 });
+        vPopulation.push({ nn: new TinyMLP(CONFIG.NN_INPUT, CONFIG.NN_HIDDEN, CONFIG.NN_OUTPUT), fitness: 0, wins: 0 });
+    }
+
+    resetBattle();
+    requestAnimationFrame(loop);
+}
+
+function resize() {
+    const maxW = window.innerWidth - 4;
+    const maxH = window.innerHeight - 120;
+    const scale = Math.min(maxW / CONFIG.ARENA_W, maxH / CONFIG.ARENA_H, 1);
+    canvas.width = CONFIG.ARENA_W * scale;
+    canvas.height = CONFIG.ARENA_H * scale;
+    canvas.style.width = canvas.width + 'px';
+    canvas.style.height = canvas.height + 'px';
+    ctx = canvas.getContext('2d', { alpha: false });
+    ctx.scale(scale, scale);
+
+    graphCanvas.width = graphCanvas.offsetWidth;
+    graphCanvas.height = graphCanvas.offsetHeight;
+}
+
+function resetBattle() {
+    const half = CONFIG.ARENA_W / 2;
+    jaune = new Agent('Jaune', '#f0c040', half * 0.3, 'left');
+    viola = new Agent('Viola', '#a040f0', half * 1.7, 'right');
+    jaune.nn = jPopulation[jIdx].nn;
+    viola.nn = vPopulation[vIdx].nn;
+    projectiles.reset();
+    battleFrames = 0;
+
+    if (syntheticMode && syntheticTarget) {
+        syntheticTarget = new SyntheticTarget(syntheticTarget.type, CONFIG.ARENA_W, CONFIG.ARENA_H);
+    }
+}
+
+function update() {
+    if (paused) return;
+
+    const steps = speedLevels[speedIdx] === 0 ? 100 : speedLevels[speedIdx];
+    for (let s = 0; s < steps; s++) {
+        frameCount++;
+        battleFrames++;
+
+        if (syntheticMode && syntheticTarget) {
+            // Synthetic training: one agent vs synthetic target
+            syntheticTarget.update();
+            const obs = jaune.observe(syntheticTarget, projectiles.active, CONFIG.ARENA_W, CONFIG.ARENA_H);
+            jaune.act(obs, projectiles, syntheticTarget);
+
+            // Synthetic target doesn't shoot back (for now)
+            projectiles.update();
+            checkCollisionsSynthetic();
+
+            if (!jaune.alive || !syntheticTarget.alive || battleFrames > maxBattleFrames) {
+                endSyntheticEpisode();
+                break;
+            }
+        } else {
+            // Self-play
+            const jObs = jaune.observe(viola, projectiles.active, CONFIG.ARENA_W, CONFIG.ARENA_H);
+            const vObs = viola.observe(jaune, projectiles.active, CONFIG.ARENA_W, CONFIG.ARENA_H);
+
+            jaune.act(jObs, projectiles, viola);
+            viola.act(vObs, projectiles, jaune);
+
+            projectiles.update();
+            checkCollisions();
+
+            if (!jaune.alive || !viola.alive || battleFrames > maxBattleFrames) {
+                endBattle();
+                break;
+            }
+        }
+    }
+}
+
+function checkCollisions() {
+    for (let p of projectiles.active) {
+        if (!p.active) continue;
+        const target = p.owner === jaune ? viola : jaune;
+        const dx = p.x - target.x;
+        const dy = p.y - target.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < target.radius + CONFIG.PROJ_RADIUS) {
+            target.takeHit(20);
+            p.owner.hits++;
+            p.owner.reward += CONFIG.HIT_REWARD;
+            p.active = false;
+
+            // Remove from active array
+            const idx = projectiles.active.indexOf(p);
+            if (idx >= 0) projectiles.active.splice(idx, 1);
+        }
+    }
+}
+
+function checkCollisionsSynthetic() {
+    for (let p of projectiles.active) {
+        if (!p.active) continue;
+        if (p.owner === jaune) {
+            const dx = p.x - syntheticTarget.x;
+            const dy = p.y - syntheticTarget.y;
+            if (Math.sqrt(dx * dx + dy * dy) < syntheticTarget.radius + CONFIG.PROJ_RADIUS) {
+                syntheticTarget.takeHit(20);
+                jaune.hits++;
+                jaune.reward += CONFIG.HIT_REWARD;
+                p.active = false;
+                const idx = projectiles.active.indexOf(p);
+                if (idx >= 0) projectiles.active.splice(idx, 1);
+            }
+        }
+    }
+}
+
+function endBattle() {
+    // Calculate fitness
+    let jFitness = jaune.reward + jaune.hits * 5 - jaune.hitsTaken * 3;
+    let vFitness = viola.reward + viola.hits * 5 - viola.hitsTaken * 3;
+
+    if (!jaune.alive && viola.alive) {
+        vFitness += 20; vWins++; vPopulation[vIdx].wins++;
+    } else if (!viola.alive && jaune.alive) {
+        jFitness += 20; jWins++; jPopulation[jIdx].wins++;
+    } else {
+        // Timeout: reward for more HP
+        jFitness += (jaune.hp - viola.hp) * 0.1;
+        vFitness += (viola.hp - jaune.hp) * 0.1;
+    }
+
+    jPopulation[jIdx].fitness += jFitness;
+    vPopulation[vIdx].fitness += vFitness;
+
+    // Move to next pairing
+    vIdx = (vIdx + 1) % CONFIG.POP_SIZE;
+    if (vIdx === 0) {
+        jIdx = (jIdx + 1) % CONFIG.POP_SIZE;
+        if (jIdx === 0) {
+            // Generation complete
+            evolvePopulation(jPopulation);
+            evolvePopulation(vPopulation);
+            generation++;
+            history.jaune.push(jWins);
+            history.viola.push(vWins);
+            history.generations.push(generation);
+            jWins = 0; vWins = 0;
+            document.getElementById('gen').textContent = generation;
+        }
+    }
+
+    round++;
+    document.getElementById('round').textContent = round;
+    document.getElementById('jScore').textContent = jWins;
+    document.getElementById('vScore').textContent = vWins;
+
+    resetBattle();
+}
+
+function endSyntheticEpisode() {
+    let fitness = jaune.reward + jaune.hits * 8;
+    if (syntheticTarget && !syntheticTarget.alive) fitness += 30;
+    if (!jaune.alive) fitness -= 10;
+
+    jPopulation[jIdx].fitness += fitness;
+
+    syntheticEpisode++;
+    const types = ['stationary', 'moving', 'random', 'circling', 'zigzag', 'fast', 'slow', 'dodge', 'boundary'];
+    const typeIdx = Math.min(Math.floor(syntheticEpisode / 3), types.length - 1);
+
+    jIdx = (jIdx + 1) % CONFIG.POP_SIZE;
+    if (jIdx === 0) {
+        evolvePopulation(jPopulation);
+        generation++;
+        document.getElementById('gen').textContent = generation;
+        history.jaune.push(jPopulation[0].fitness);
+        history.generations.push(generation);
+    }
+
+    if (syntheticEpisode >= CONFIG.SYNTHETIC_EPISODES) {
+        syntheticMode = false;
+        syntheticTarget = null;
+        document.querySelector('button[onclick="toggleSynthetic()"]').textContent = 'Synthetic: OFF';
+        training = true;
+        selfPlayEpisode = 0;
+    } else {
+        syntheticTarget = new SyntheticTarget(types[typeIdx], CONFIG.ARENA_W, CONFIG.ARENA_H);
+    }
+
+    resetBattle();
+}
+
+function evolvePopulation(pop) {
+    // Sort by fitness
+    pop.sort((a, b) => b.fitness - a.fitness);
+
+    const eliteCount = Math.max(1, Math.floor(CONFIG.POP_SIZE * CONFIG.ELITE_RATIO));
+    const newPop = [];
+
+    // Keep elites
+    for (let i = 0; i < eliteCount; i++) {
+        newPop.push({ nn: pop[i].nn.clone(), fitness: 0, wins: 0 });
+    }
+
+    // Breed rest
+    while (newPop.length < CONFIG.POP_SIZE) {
+        const parent = pop[Math.floor(Math.random() * eliteCount)];
+        const child = { nn: parent.nn.clone(), fitness: 0, wins: 0 };
+        child.nn.mutate(CONFIG.MUTATION_RATE, CONFIG.MUTATION_STRENGTH);
+        newPop.push(child);
+    }
+
+    // Replace
+    for (let i = 0; i < CONFIG.POP_SIZE; i++) {
+        pop[i] = newPop[i];
+    }
+}
+
+// ==================== RENDERING ====================
+function render() {
+    if (!visualsOn) return;
+
+    // Clear
+    ctx.fillStyle = '#0d0d14';
+    ctx.fillRect(0, 0, CONFIG.ARENA_W, CONFIG.ARENA_H);
+
+    // Center line
+    ctx.strokeStyle = '#1a1a2e';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8, 8]);
+    ctx.beginPath();
+    ctx.moveTo(CONFIG.ARENA_W / 2, 0);
+    ctx.lineTo(CONFIG.ARENA_W / 2, CONFIG.ARENA_H);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Boundary
+    ctx.strokeStyle = '#2a2a3e';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(1, 1, CONFIG.ARENA_W - 2, CONFIG.ARENA_H - 2);
+
+    // Projectiles
+    ctx.fillStyle = '#ff4444';
+    for (let p of projectiles.active) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, CONFIG.PROJ_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // Agents
+    if (jaune && jaune.alive) drawAgent(jaune);
+    if (viola && viola.alive) drawAgent(viola);
+    if (syntheticTarget && syntheticTarget.alive) drawSynthetic(syntheticTarget);
+
+    // Debug overlays
+    if (debugOn) {
+        drawDebug();
+    }
+
+    // Update graph
+    drawGraph();
+}
+
+function drawAgent(agent) {
+    // Trail
+    for (let i = 0; i < agent.trail.length - 1; i++) {
+        const t = agent.trail[i];
+        ctx.globalAlpha = t.alpha * 0.3;
+        ctx.fillStyle = agent.color;
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, agent.radius * 0.5, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Body
+    ctx.fillStyle = agent.color;
+    ctx.beginPath();
+    ctx.arc(agent.x, agent.y, agent.radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    // HP ring
+    const hpRatio = agent.hp / agent.maxHp;
+    ctx.strokeStyle = hpRatio > 0.5 ? '#4a4' : hpRatio > 0.25 ? '#aa4' : '#a44';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(agent.x, agent.y, agent.radius + 3, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * hpRatio);
+    ctx.stroke();
+
+    // Aim line
+    ctx.strokeStyle = agent.color;
+    ctx.globalAlpha = 0.4;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(agent.x, agent.y);
+    ctx.lineTo(agent.x + agent.aimX * 30, agent.y + agent.aimY * 30);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    // Cooldown indicator
+    if (agent.cooldown > 0) {
+        ctx.fillStyle = 'rgba(255,255,255,0.2)';
+        ctx.beginPath();
+        ctx.arc(agent.x, agent.y, agent.radius * (agent.cooldown / CONFIG.COOLDOWN), 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // Name
+    ctx.fillStyle = '#888';
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(agent.name, agent.x, agent.y - agent.radius - 8);
+}
+
+function drawSynthetic(target) {
+    ctx.fillStyle = '#888';
+    ctx.beginPath();
+    ctx.arc(target.x, target.y, target.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#aaa';
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Target', target.x, target.y - target.radius - 8);
+}
+
+function drawDebug() {
+    if (!jaune || !viola) return;
+
+    // Prediction vectors
+    ctx.strokeStyle = '#f0c040';
+    ctx.globalAlpha = 0.3;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(jaune.x, jaune.y);
+    ctx.lineTo(jaune.predictionX, jaune.predictionY);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#a040f0';
+    ctx.beginPath();
+    ctx.moveTo(viola.x, viola.y);
+    ctx.lineTo(viola.predictionX, viola.predictionY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+
+    // Stats
+    ctx.fillStyle = '#666';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(`J: r=${jaune.reward.toFixed(1)} h=${jaune.hits} s=${jaune.shots}`, 8, 20);
+    ctx.fillText(`V: r=${viola.reward.toFixed(1)} h=${viola.hits} s=${viola.shots}`, CONFIG.ARENA_W / 2 + 8, 20);
+}
+
+function drawGraph() {
+    const w = graphCanvas.width, h = graphCanvas.height;
+    graphCtx.clearRect(0, 0, w, h);
+    if (history.jaune.length < 2) return;
+
+    graphCtx.strokeStyle = '#333';
+    graphCtx.lineWidth = 1;
+    graphCtx.beginPath();
+    graphCtx.moveTo(0, h / 2);
+    graphCtx.lineTo(w, h / 2);
+    graphCtx.stroke();
+
+    const maxVal = Math.max(...history.jaune, ...history.viola, 1);
+    const step = w / Math.max(history.jaune.length - 1, 1);
+
+    // Jaune line
+    graphCtx.strokeStyle = '#f0c040';
+    graphCtx.lineWidth = 1.5;
+    graphCtx.beginPath();
+    for (let i = 0; i < history.jaune.length; i++) {
+        const x = i * step;
+        const y = h - (history.jaune[i] / maxVal) * (h - 10) - 5;
+        if (i === 0) graphCtx.moveTo(x, y);
+        else graphCtx.lineTo(x, y);
+    }
+    graphCtx.stroke();
+
+    // Viola line
+    graphCtx.strokeStyle = '#a040f0';
+    graphCtx.beginPath();
+    for (let i = 0; i < history.viola.length; i++) {
+        const x = i * step;
+        const y = h - (history.viola[i] / maxVal) * (h - 10) - 5;
+        if (i === 0) graphCtx.moveTo(x, y);
+        else graphCtx.lineTo(x, y);
+    }
+    graphCtx.stroke();
+}
+
+// ==================== LOOP ====================
+function loop(timestamp) {
+    const dt = timestamp - lastTime;
+    lastTime = timestamp;
+    fps = Math.round(1000 / (dt || 16));
+    document.getElementById('fps').textContent = fps;
+
+    update();
+    render();
+
+    requestAnimationFrame(loop);
+}
+
+// ==================== CONTROLS ====================
+function toggleTraining() {
+    training = !training;
+    const btn = document.getElementById('btnTrain');
+    if (training) {
+        btn.textContent = 'Stop Training';
+        btn.classList.add('active');
+        speedIdx = 2; // 15x
+        document.getElementById('speed').textContent = speedLevels[speedIdx] + 'x';
+    } else {
+        btn.textContent = 'Start Training';
+        btn.classList.remove('active');
+        speedIdx = 0;
+        document.getElementById('speed').textContent = '1x';
+    }
+}
+
+function toggleVis() {
+    visualsOn = !visualsOn;
+    document.getElementById('btnVis').textContent = visualsOn ? 'Visuals: ON' : 'Visuals: OFF';
+}
+
+function cycleSpeed() {
+    speedIdx = (speedIdx + 1) % speedLevels.length;
+    const spd = speedLevels[speedIdx];
+    document.getElementById('speed').textContent = spd === 0 ? 'MAX' : spd + 'x';
+}
+
+function toggleDebug() {
+    debugOn = !debugOn;
+}
+
+function toggleSynthetic() {
+    syntheticMode = !syntheticMode;
+    const btn = document.querySelector('button[onclick="toggleSynthetic()"]');
+    if (syntheticMode) {
+        btn.textContent = 'Synthetic: ON';
+        syntheticEpisode = 0;
+        syntheticTarget = new SyntheticTarget('stationary', CONFIG.ARENA_W, CONFIG.ARENA_H);
+        jIdx = 0;
+        for (let p of jPopulation) { p.fitness = 0; p.wins = 0; }
+        resetBattle();
+    } else {
+        btn.textContent = 'Synthetic: OFF';
+        syntheticTarget = null;
+    }
+}
+
+function saveModels() {
+    const data = {
+        jaune: jPopulation[0].nn.serialize(),
+        viola: vPopulation[0].nn.serialize(),
+        gen: generation,
+        history: history
+    };
+    const blob = new Blob([JSON.stringify(Array.from(data.jaune)) + '
+' + JSON.stringify(Array.from(data.viola))], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `swarm_models_gen${generation}.txt`;
+    a.click();
+}
+
+function loadModels() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.txt';
+    input.onchange = (e) => {
+        const file = e.target.files[0];
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            const lines = ev.target.result.split('
+');
+            if (lines.length >= 2) {
+                const jWeights = new Float32Array(JSON.parse(lines[0]));
+                const vWeights = new Float32Array(JSON.parse(lines[1]));
+                jPopulation[0].nn = new TinyMLP(CONFIG.NN_INPUT, CONFIG.NN_HIDDEN, CONFIG.NN_OUTPUT, jWeights);
+                vPopulation[0].nn = new TinyMLP(CONFIG.NN_INPUT, CONFIG.NN_HIDDEN, CONFIG.NN_OUTPUT, vWeights);
+                // Propagate to rest
+                for (let i = 1; i < CONFIG.POP_SIZE; i++) {
+                    jPopulation[i].nn = jPopulation[0].nn.clone();
+                    jPopulation[i].nn.mutate(0.3, 0.2);
+                    vPopulation[i].nn = vPopulation[0].nn.clone();
+                    vPopulation[i].nn.mutate(0.3, 0.2);
+                }
+                resetBattle();
+            }
+        };
+        reader.readAsText(file);
+    };
+    input.click();
+}
+
+// Touch controls for manual override (optional)
+canvas = document.getElementById('arena');
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = CONFIG.ARENA_W / rect.width;
+    const scaleY = CONFIG.ARENA_H / rect.height;
+    for (let touch of e.touches) {
+        const x = (touch.clientX - rect.left) * scaleX;
+        const y = (touch.clientY - rect.top) * scaleY;
+        // Tap left half = nudge Jaune, right half = nudge Viola
+        if (x < CONFIG.ARENA_W / 2 && jaune) {
+            jaune.vx += (x - jaune.x) * 0.05;
+            jaune.vy += (y - jaune.y) * 0.05;
+        } else if (viola) {
+            viola.vx += (x - viola.x) * 0.05;
+            viola.vy += (y - viola.y) * 0.05;
+        }
+    }
+}, { passive: false });
+
+// ==================== INIT ====================
+window.onload = init;
+</script>
+</body>
+</html>
