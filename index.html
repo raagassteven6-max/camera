@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Simple Camera</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.20.0/tf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.22.0/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -451,7 +451,7 @@
                 modelStatus.classList.add('active');
                 detectorPromise = cocoSsd.load({ base: 'lite_mobilenet_v2' });
                 detector = await detectorPromise;
-                modelStatus.textContent = 'Detector ready';
+                modelStatus.textContent = `Ready — tf ${tf.version.tfjs}, backend: ${tf.getBackend()}`;
                 // (kept visible for diagnostics — detectLoop will keep updating this text)
             } catch (err) {
                 console.error('Detector load error:', err);
@@ -462,6 +462,11 @@
 
         async function detectLoop() {
             if (!detectLoopRunning || !detector || !stream) return;
+
+            if (video.readyState < 2 || video.videoWidth === 0) {
+                requestAnimationFrame(detectLoop);
+                return;
+            }
 
             try {
                 const preds = await detector.detect(video);
