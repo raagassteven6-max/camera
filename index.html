@@ -141,7 +141,7 @@ function iou(a, b) {
     return unionArea <= 0 ? 0 : interArea / unionArea;
 }
 
-function updateTracks(detections) {
+function updateTracks(detections, ranFace) {
     const assigned = new Set();
 
     detections.forEach((det) => {
@@ -176,8 +176,12 @@ function updateTracks(detections) {
         }
     });
 
+    // Only age tracks whose detector actually ran this frame — the other
+    // group's boxes just hold their last known position until their turn.
     tracks.forEach((t, i) => {
-        if (!assigned.has(i)) t.lastSeen++;
+        if (assigned.has(i)) return;
+        const isFaceTrack = t.class === 'face';
+        if (isFaceTrack === ranFace) t.lastSeen++;
     });
 
     tracks = tracks.filter((t) => t.lastSeen <= MAX_LOST_FRAMES);
@@ -203,6 +207,7 @@ function drawTracks() {
 }
 
 // --- detection loop: self-chaining, gated on completion (no pile-up) ---
+let frameCount = 0;
 async function detectLoop() {
     if (!running) return;
 
@@ -213,33 +218,37 @@ async function detectLoop() {
 
     const ts = performance.now();
     const detections = [];
+    const runFace = frameCount % 2 === 1;
+    frameCount++;
 
     try {
-        const objResult = objectDetector.detectForVideo(video, ts);
-        objResult.detections.forEach((d) => {
-            const cat = d.categories[0];
-            if (cat.score < MIN_SCORE) return;
-            const bb = d.boundingBox;
-            detections.push({
-                class: cat.categoryName,
-                score: cat.score,
-                box: [bb.originX, bb.originY, bb.width, bb.height]
+        if (!runFace) {
+            const objResult = objectDetector.detectForVideo(video, ts);
+            objResult.detections.forEach((d) => {
+                const cat = d.categories[0];
+                if (cat.score < MIN_SCORE) return;
+                const bb = d.boundingBox;
+                detections.push({
+                    class: cat.categoryName,
+                    score: cat.score,
+                    box: [bb.originX, bb.originY, bb.width, bb.height]
+                });
             });
-        });
-
-        const faceResult = faceDetector.detectForVideo(video, ts);
-        faceResult.detections.forEach((d) => {
-            const score = d.categories?.[0]?.score ?? 0;
-            if (score < MIN_SCORE) return;
-            const bb = d.boundingBox;
-            detections.push({
-                class: 'face',
-                score,
-                box: [bb.originX, bb.originY, bb.width, bb.height]
+        } else {
+            const faceResult = faceDetector.detectForVideo(video, ts);
+            faceResult.detections.forEach((d) => {
+                const score = d.categories?.[0]?.score ?? 0;
+                if (score < MIN_SCORE) return;
+                const bb = d.boundingBox;
+                detections.push({
+                    class: 'face',
+                    score,
+                    box: [bb.originX, bb.originY, bb.width, bb.height]
+                });
             });
-        });
+        }
 
-        updateTracks(detections);
+        updateTracks(detections, runFace);
         drawTracks();
         tickFps();
     } catch (err) {
