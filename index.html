@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Simple Camera</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.20.0/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -197,6 +199,41 @@
             display: none;
         }
         #loading-text.active { display: block; }
+        #overlay {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: 10;
+        }
+        #activity-log {
+            position: absolute;
+            bottom: 12px;
+            left: 12px;
+            right: 12px;
+            max-height: 120px;
+            overflow-y: auto;
+            background: rgba(0,0,0,0.55);
+            border-radius: 10px;
+            padding: 8px 10px;
+            font-size: 12px;
+            line-height: 1.5;
+            display: none;
+            z-index: 20;
+            pointer-events: none;
+        }
+        #activity-log.active { display: block; }
+        #activity-log div { opacity: 0.9; }
+        #model-status {
+            position: absolute;
+            top: 20px; left: 20px;
+            background: rgba(0,0,0,0.6);
+            padding: 6px 12px;
+            border-radius: 14px;
+            font-size: 12px;
+            z-index: 20;
+            display: none;
+        }
+        #model-status.active { display: block; }
     </style>
 </head>
 <body>
@@ -219,7 +256,10 @@
             <p>Camera is ready</p>
         </div>
         <video id="video" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+        <div id="model-status">Loading detector…</div>
         <div id="counter">📸 <span id="photo-count">0</span></div>
+        <div id="activity-log"></div>
     </div>
 
     <div id="error-msg"></div>
@@ -264,6 +304,202 @@
         let photos = [];
         let permissionGranted = false;
 
+        // --- Agentic tracking layer ---
+        const overlay = document.getElementById('overlay');
+        const overlayCtx = overlay.getContext('2d');
+        const modelStatus = document.getElementById('model-status');
+        const activityLog = document.getElementById('activity-log');
+
+        let detector = null;
+        let detectorPromise = null;
+        let detectLoopRunning = false;
+        let tracks = [];       // persistent tracked objects: {id, class, box:[x,y,w,h], lastSeen, lost}
+        let nextTrackId = 1;
+        const IOU_MATCH_THRESHOLD = 0.3;
+        const MAX_LOST_FRAMES = 20; // ~ keep "state memory" this many missed frames before dropping
+
+        // rule-based action-binding table: class -> handler
+        const ACTION_TABLE = {
+            'potted plant': (track) => logAction(`🌱 Health-log started for ${track.label}`),
+            'person':       (track) => logAction(`🧍 Follow-mode engaged for ${track.label}`),
+            'bottle':       (track) => logAction(`🏷️ Price-lookup started for ${track.label}`),
+            'cell phone':   (track) => logAction(`🏷️ Price-lookup started for ${track.label}`),
+            'cup':          (track) => logAction(`🏷️ Price-lookup started for ${track.label}`),
+            'book':         (track) => logAction(`🏷️ Price-lookup started for ${track.label}`),
+        };
+        const DEFAULT_ACTION = (track) => logAction(`ℹ️ No workflow bound to "${track.label}" yet`);
+
+        function logAction(msg) {
+            activityLog.classList.add('active');
+            const line = document.createElement('div');
+            line.textContent = msg;
+            activityLog.prepend(line);
+            while (activityLog.children.length > 6) activityLog.removeChild(activityLog.lastChild);
+        }
+
+        function iou(a, b) {
+            const [ax, ay, aw, ah] = a, [bx, by, bw, bh] = b;
+            const x1 = Math.max(ax, bx), y1 = Math.max(ay, by);
+            const x2 = Math.min(ax + aw, bx + bw), y2 = Math.min(ay + ah, by + bh);
+            const interW = Math.max(0, x2 - x1), interH = Math.max(0, y2 - y1);
+            const interArea = interW * interH;
+            const unionArea = aw * ah + bw * bh - interArea;
+            return unionArea <= 0 ? 0 : interArea / unionArea;
+        }
+
+        // Rule-based tracker: matches new detections to existing tracks by IOU,
+        // with a spatial-distance tiebreaker to reduce ID swaps among overlapping objects.
+        function updateTracks(detections) {
+            const unmatched = new Set(tracks.map((_, i) => i));
+            const assigned = new Set();
+
+            detections.forEach((det) => {
+                let bestIou = 0, bestIdx = -1, bestScore = -1;
+                tracks.forEach((t, i) => {
+                    if (assigned.has(i) || t.class !== det.class) return;
+                    const iouScore = iou(t.box, det.box);
+
+                    // Spatial tiebreaker to reduce ID swaps among overlapping objects
+                    const tcx = t.box[0] + t.box[2] / 2;
+                    const tcy = t.box[1] + t.box[3] / 2;
+                    const dcx = det.box[0] + det.box[2] / 2;
+                    const dcy = det.box[1] + det.box[3] / 2;
+                    const dist = Math.hypot(tcx - dcx, tcy - dcy);
+                    const maxDim = Math.max(video.videoWidth || 1, video.videoHeight || 1);
+                    const distScore = 1 - Math.min(dist / maxDim, 1);
+                    const score = iouScore * 0.7 + distScore * 0.3;
+
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestIou = iouScore;
+                        bestIdx = i;
+                    }
+                });
+
+                if (bestIdx !== -1 && bestIou >= IOU_MATCH_THRESHOLD) {
+                    const t = tracks[bestIdx];
+                    t.box = det.box;
+                    t.lastSeen = 0;
+                    t.lost = false;
+                    assigned.add(bestIdx);
+                    unmatched.delete(bestIdx);
+                } else {
+                    tracks.push({
+                        id: nextTrackId++,
+                        class: det.class,
+                        label: det.class,
+                        box: det.box,
+                        lastSeen: 0,
+                        lost: false,
+                        bound: false
+                    });
+                }
+            });
+
+            unmatched.forEach((i) => {
+                tracks[i].lastSeen++;
+                tracks[i].lost = tracks[i].lastSeen > 3;
+            });
+
+            tracks = tracks.filter((t) => t.lastSeen <= MAX_LOST_FRAMES);
+        }
+
+        // Coordinate mapping: video native pixels -> overlay canvas pixels.
+        // Accounts for object-fit: cover (uniform scale with crop offsets).
+        function getVideoToCanvasTransform() {
+            const vW = video.videoWidth || 1;
+            const vH = video.videoHeight || 1;
+            const cW = overlay.width;
+            const cH = overlay.height;
+            const scale = Math.max(cW / vW, cH / vH);
+            const offsetX = (vW * scale - cW) / 2;
+            const offsetY = (vH * scale - cH) / 2;
+            return { scale, offsetX, offsetY };
+        }
+
+        function videoToCanvasRect([vx, vy, vw, vh]) {
+            const { scale, offsetX, offsetY } = getVideoToCanvasTransform();
+            return [vx * scale - offsetX, vy * scale - offsetY, vw * scale, vh * scale];
+        }
+
+        function drawTracks() {
+            overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+            tracks.forEach((t) => {
+                if (t.lastSeen > 0) return;
+                const [x, y, w, h] = videoToCanvasRect(t.box);
+                if (w <= 0 || h <= 0) return;
+                overlayCtx.strokeStyle = t.bound ? '#4CAF50' : '#00E5FF';
+                overlayCtx.lineWidth = 2;
+                overlayCtx.strokeRect(x, y, w, h);
+                overlayCtx.fillStyle = t.bound ? '#4CAF50' : '#00E5FF';
+                const text = `${t.label} #${t.id}`;
+                const textW = overlayCtx.measureText(text).width;
+                overlayCtx.fillRect(x, y - 18, textW + 10, 18);
+                overlayCtx.fillStyle = '#000';
+                overlayCtx.font = '12px -apple-system, sans-serif';
+                overlayCtx.fillText(text, x + 5, y - 5);
+            });
+        }
+
+        async function loadDetector() {
+            if (detector) return;
+            if (detectorPromise) {
+                await detectorPromise;
+                return;
+            }
+            try {
+                modelStatus.classList.add('active');
+                detectorPromise = cocoSsd.load({ base: 'lite_mobilenet_v2' });
+                detector = await detectorPromise;
+                modelStatus.textContent = 'Detector ready';
+                setTimeout(() => modelStatus.classList.remove('active'), 1500);
+            } catch (err) {
+                console.error('Detector load error:', err);
+                modelStatus.textContent = 'Detector failed to load';
+                detectorPromise = null;
+            }
+        }
+
+        async function detectLoop() {
+            if (!detectLoopRunning || !detector || !stream) return;
+
+            try {
+                const preds = await detector.detect(video);
+                const detections = preds
+                    .filter((p) => p.score > 0.55)
+                    .map((p) => ({ class: p.class, box: p.bbox }));
+                updateTracks(detections);
+                drawTracks();
+            } catch (err) {
+                console.error('Detect error:', err);
+            }
+
+            requestAnimationFrame(detectLoop);
+        }
+
+        function resizeOverlay() {
+            overlay.width = video.clientWidth;
+            overlay.height = video.clientHeight;
+        }
+
+        overlay.addEventListener('click', (e) => {
+            const rect = overlay.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            const hit = tracks.find((t) => {
+                if (t.lastSeen > 0) return false;
+                const [bx, by, bw, bh] = videoToCanvasRect(t.box);
+                return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+            });
+
+            if (!hit) return;
+            if (hit.bound) return; // already bound — no re-fire
+            hit.bound = true;
+            const action = ACTION_TABLE[hit.class] || DEFAULT_ACTION;
+            action(hit);
+        });
+
         // Check browser support
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             showPermissionError('Your browser does not support camera access. Please use Chrome, Safari, or Firefox.');
@@ -295,7 +531,7 @@
                 // First, try to enumerate devices to see if cameras exist
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 const videoDevices = devices.filter(d => d.kind === 'videoinput');
-                
+
                 if (videoDevices.length === 0) {
                     showPermissionError('No camera found on this device.');
                     return;
@@ -306,16 +542,16 @@
                     video: { facingMode: currentFacing },
                     audio: false
                 });
-                
+
                 // Permission granted! Stop the test stream
                 testStream.getTracks().forEach(track => track.stop());
-                
+
                 permissionGranted = true;
                 permissionScreen.classList.add('hidden');
-                
+
                 // Auto-start camera
                 await startCamera();
-                
+
             } catch (err) {
                 console.error('Permission error:', err);
                 if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
@@ -347,7 +583,7 @@
 
                 stream = await navigator.mediaDevices.getUserMedia(constraints);
                 video.srcObject = stream;
-                
+
                 await new Promise((resolve) => {
                     video.onloadedmetadata = () => {
                         video.play();
@@ -361,6 +597,14 @@
                 captureBtn.classList.remove('hidden');
                 switchBtn.classList.remove('hidden');
                 counter.classList.add('active');
+
+                resizeOverlay();
+                tracks = [];
+                if (!detector) await loadDetector();
+                if (!detectLoopRunning) {
+                    detectLoopRunning = true;
+                    requestAnimationFrame(detectLoop);
+                }
 
             } catch (err) {
                 console.error('Camera start error:', err);
@@ -381,14 +625,14 @@
             canvas.height = video.videoHeight || 720;
 
             const ctx = canvas.getContext('2d');
-            
+
             if (currentFacing === 'user') {
                 ctx.translate(canvas.width, 0);
                 ctx.scale(-1, 1);
             }
 
             ctx.drawImage(video, 0, 0);
-            
+
             const photoData = canvas.toDataURL('image/jpeg', 0.9);
             photos.push(photoData);
             photoCount.textContent = photos.length;
@@ -427,6 +671,8 @@
                 stream.getTracks().forEach(track => track.stop());
             }
         });
+
+        window.addEventListener('resize', resizeOverlay);
     </script>
 </body>
 </html>
