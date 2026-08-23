@@ -452,7 +452,7 @@
                 detectorPromise = cocoSsd.load({ base: 'lite_mobilenet_v2' });
                 detector = await detectorPromise;
                 modelStatus.textContent = 'Detector ready';
-                setTimeout(() => modelStatus.classList.remove('active'), 1500);
+                // (kept visible for diagnostics — detectLoop will keep updating this text)
             } catch (err) {
                 console.error('Detector load error:', err);
                 modelStatus.textContent = 'Detector failed to load';
@@ -465,6 +465,18 @@
 
             try {
                 const preds = await detector.detect(video);
+
+                // --- TEMP DIAGNOSTIC: show raw predictions on-screen ---
+                if (preds.length === 0) {
+                    modelStatus.textContent = 'Detector ready — 0 raw predictions';
+                } else {
+                    const top = preds.reduce((a, b) => (b.score > a.score ? b : a));
+                    modelStatus.textContent =
+                        `${preds.length} raw: top="${top.class}" ${(top.score * 100).toFixed(0)}%`;
+                }
+                modelStatus.classList.add('active');
+                // --- END TEMP DIAGNOSTIC ---
+
                 const detections = preds
                     .filter((p) => p.score > 0.55)
                     .map((p) => ({ class: p.class, box: p.bbox }));
@@ -472,6 +484,8 @@
                 drawTracks();
             } catch (err) {
                 console.error('Detect error:', err);
+                modelStatus.textContent = 'Detect error: ' + err.message;
+                modelStatus.classList.add('active');
             }
 
             requestAnimationFrame(detectLoop);
