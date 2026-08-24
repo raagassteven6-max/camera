@@ -63,6 +63,72 @@
         font-weight: 600;
     }
     #start-overlay.hidden { display: none; }
+
+    #target-preview {
+        position: absolute;
+        top: 52px; left: 12px;
+        width: 80px; height: 80px;
+        border: 2px solid #FFD600;
+        border-radius: 8px;
+        z-index: 20;
+        display: none;
+        background: #000;
+    }
+    #target-preview.active { display: block; }
+    #target-label {
+        position: absolute;
+        top: 136px; left: 12px;
+        max-width: 200px;
+        background: rgba(0,0,0,0.6);
+        color: #FFD600;
+        font-size: 11px;
+        padding: 4px 8px;
+        border-radius: 8px;
+        z-index: 20;
+        display: none;
+    }
+    #target-label.active { display: block; }
+
+    #ask-bar {
+        position: absolute;
+        bottom: 12px; left: 12px; right: 12px;
+        display: flex; gap: 8px;
+        z-index: 20;
+    }
+    #ask-input {
+        flex: 1;
+        padding: 10px 14px;
+        border-radius: 20px;
+        border: none;
+        background: rgba(255,255,255,0.9);
+        font-size: 14px;
+    }
+    #ask-btn {
+        padding: 10px 18px;
+        border-radius: 20px;
+        border: none;
+        background: #FFD600;
+        font-weight: 600;
+        font-size: 14px;
+    }
+
+    #bridge-debug {
+        position: absolute;
+        bottom: 64px; left: 12px; right: 12px;
+        max-height: 32vh;
+        overflow-y: auto;
+        background: rgba(0,0,0,0.75);
+        color: #9CFF9C;
+        font-family: 'SF Mono', Menlo, monospace;
+        font-size: 11px;
+        line-height: 1.5;
+        padding: 8px 10px;
+        border-radius: 10px;
+        z-index: 20;
+        display: none;
+        white-space: pre-wrap;
+    }
+    #bridge-debug.active { display: block; }
 </style>
 </head>
 <body>
@@ -72,6 +138,13 @@
     <div id="hud-top">
         <div id="status">Loading…</div>
         <div id="fps">0 fps</div>
+    </div>
+    <canvas id="target-preview" width="80" height="80"></canvas>
+    <div id="target-label"></div>
+    <div id="bridge-debug"></div>
+    <div id="ask-bar">
+        <input id="ask-input" type="text" placeholder="Ask about what's in view…">
+        <button id="ask-btn">Ask</button>
     </div>
     <div id="start-overlay">
         <button id="start-btn">Start Live Tracker</button>
@@ -92,6 +165,14 @@ const statusEl = document.getElementById('status');
 const fpsEl = document.getElementById('fps');
 const startOverlay = document.getElementById('start-overlay');
 const startBtn = document.getElementById('start-btn');
+const targetPreview = document.getElementById('target-preview');
+const targetPreviewCtx = targetPreview.getContext('2d');
+const targetLabel = document.getElementById('target-label');
+const bridgeDebug = document.getElementById('bridge-debug');
+const askInput = document.getElementById('ask-input');
+const askBtn = document.getElementById('ask-btn');
+
+let lockedId = null;
 
 let objectDetector = null;
 let faceDetector = null;
@@ -192,11 +273,13 @@ function drawTracks() {
     tracks.forEach((t) => {
         if (t.lastSeen > 0) return; // strictly live — hide immediately if not currently detected
         const [x, y, w, h] = toCanvasRect(t.box);
-        const color = t.class === 'face' ? '#FF3D9A' : '#00E5FF';
+        const isLocked = t.id === lockedId;
+        const isTarget = t === getCurrentTarget();
+        const color = isLocked ? '#FFD600' : (t.class === 'face' ? '#FF3D9A' : '#00E5FF');
         overlayCtx.strokeStyle = color;
-        overlayCtx.lineWidth = 2;
+        overlayCtx.lineWidth = isLocked ? 3 : (isTarget ? 3 : 2);
         overlayCtx.strokeRect(x, y, w, h);
-        const label = `${t.class} #${t.id} ${(t.score * 100).toFixed(0)}%`;
+        const label = `${isLocked ? '🔒 ' : ''}${t.class} #${t.id} ${(t.score * 100).toFixed(0)}%`;
         overlayCtx.font = '13px -apple-system, sans-serif';
         const textW = overlayCtx.measureText(label).width;
         overlayCtx.fillStyle = color;
@@ -205,6 +288,138 @@ function drawTracks() {
         overlayCtx.fillText(label, x + 5, Math.max(12, y - 5));
     });
 }
+
+// --- targeting: locked track wins, else dominant (largest area, tiebreak by score), else null ---
+function getCurrentTarget() {
+    const live = tracks.filter((t) => t.lastSeen === 0);
+    if (live.length === 0) return null;
+
+    if (lockedId !== null) {
+        const locked = live.find((t) => t.id === lockedId);
+        if (locked) return locked;
+        lockedId = null; // locked object left frame — fall through to dominant
+    }
+
+    return live.reduce((best, t) => {
+        const area = t.box[2] * t.box[3];
+        const bestArea = best.box[2] * best.box[3];
+        if (area > bestArea) return t;
+        if (area === bestArea && t.score > best.score) return t;
+        return best;
+    });
+}
+
+// --- 3x3 zone quantization to kill jitter in position descriptions ---
+function quantizeZone(box) {
+    const [x, y, w, h] = box;
+    const cx = (x + w / 2) / video.videoWidth;
+    const cy = (y + h / 2) / video.videoHeight;
+    const col = cx < 1 / 3 ? 'left' : cx < 2 / 3 ? 'center' : 'right';
+    const row = cy < 1 / 3 ? 'top' : cy < 2 / 3 ? 'middle' : 'bottom';
+    if (row === 'middle' && col === 'center') return 'center';
+    return `${row}-${col}`;
+}
+
+function sizeDescriptor(box) {
+    const areaFrac = (box[2] * box[3]) / (video.videoWidth * video.videoHeight);
+    if (areaFrac > 0.35) return 'close';
+    if (areaFrac > 0.1) return 'medium distance';
+    return 'far';
+}
+
+// --- geometry-only scene state, rebuilt fresh each call, always current, no history to manage ---
+function buildSceneState() {
+    const live = tracks.filter((t) => t.lastSeen === 0);
+    const target = getCurrentTarget();
+
+    if (live.length === 0) {
+        return { text: 'Nothing currently detected in view.', target: null };
+    }
+
+    const lines = live.map((t) => {
+        const marker = t === target ? ' [TARGET]' : '';
+        const lockMarker = t.id === lockedId ? ' [LOCKED BY USER]' : '';
+        return `${t.class} #${t.id} (${quantizeZone(t.box)}, ${sizeDescriptor(t.box)}, ${(t.score * 100).toFixed(0)}% confidence)${marker}${lockMarker}`;
+    });
+
+    return {
+        text: `Current scene:\n${lines.join('\n')}`,
+        target
+    };
+}
+
+// --- crop the target region from the live video into the preview canvas (native pixels) ---
+function drawTargetPreview(target) {
+    if (!target) {
+        targetPreview.classList.remove('active');
+        targetLabel.classList.remove('active');
+        return;
+    }
+    const [x, y, w, h] = target.box;
+    // pad slightly so the crop isn't razor-tight to the box
+    const pad = 0.15;
+    const px = Math.max(0, x - w * pad);
+    const py = Math.max(0, y - h * pad);
+    const pw = Math.min(video.videoWidth - px, w * (1 + pad * 2));
+    const ph = Math.min(video.videoHeight - py, h * (1 + pad * 2));
+
+    targetPreviewCtx.clearRect(0, 0, 80, 80);
+    targetPreviewCtx.drawImage(video, px, py, pw, ph, 0, 0, 80, 80);
+    targetPreview.classList.add('active');
+
+    targetLabel.textContent = `${lockedId === target.id ? '🔒 locked' : 'auto-target'}: ${target.class} #${target.id}`;
+    targetLabel.classList.add('active');
+}
+
+// --- tap-to-lock: tap a box to lock it as the target, tap it again (or empty space) to release ---
+overlay.addEventListener('click', (e) => {
+    const rect = overlay.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const hit = tracks.find((t) => {
+        if (t.lastSeen > 0) return false;
+        const [bx, by, bw, bh] = toCanvasRect(t.box);
+        return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+    });
+
+    if (!hit) {
+        lockedId = null;
+        return;
+    }
+    lockedId = (lockedId === hit.id) ? null : hit.id;
+});
+
+// --- Ask: builds the exact payload the VLM+Stef pipeline would receive.
+// No model wired yet — this just shows what would be sent, per the plan
+// to tune the bridge before adding inference on top. ---
+function handleAsk() {
+    const question = askInput.value.trim();
+    if (!question) return;
+
+    const scene = buildSceneState();
+    drawTargetPreview(scene.target);
+
+    const targetDesc = scene.target
+        ? `${scene.target.class} #${scene.target.id} (${quantizeZone(scene.target.box)}, ${sizeDescriptor(scene.target.box)})`
+        : 'none — whole frame';
+
+    const payload =
+`[VLM call — would crop to: ${targetDesc}]
+[VLM description: <not wired yet>]
+
+${scene.text}
+
+User question: "${question}"
+
+[This full block → Stef]`;
+
+    bridgeDebug.textContent = payload;
+    bridgeDebug.classList.add('active');
+    askInput.value = '';
+}
+askBtn.addEventListener('click', handleAsk);
+askInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAsk(); });
 
 // --- detection loop: self-chaining, gated on completion (no pile-up) ---
 let frameCount = 0;
@@ -254,6 +469,7 @@ async function detectLoop() {
 
         updateTracks(detections, runFace);
         drawTracks();
+        drawTargetPreview(getCurrentTarget());
         tickFps();
     } catch (err) {
         console.error('Detect error:', err);
