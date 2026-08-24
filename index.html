@@ -232,11 +232,9 @@ const IOU_MATCH_THRESHOLD = 0.15;
 const MAX_LOST_FRAMES = 6;
 const MIN_SCORE = 0.6;
 
-// --- offscreen canvas for low-light boost ---
 const boostCanvas = document.createElement('canvas');
 const boostCtx = boostCanvas.getContext('2d', { willReadFrequently: false });
 
-// --- fps counter ---
 let frameTimes = [];
 function tickFps() {
     const now = performance.now();
@@ -245,7 +243,6 @@ function tickFps() {
     fpsEl.textContent = `${frameTimes.length} fps`;
 }
 
-// --- coordinate mapping: video native pixels -> canvas (object-fit: cover aware) ---
 function getTransform() {
     const scale = Math.max(overlay.width / video.videoWidth, overlay.height / video.videoHeight);
     const offsetX = (video.videoWidth * scale - overlay.width) / 2;
@@ -263,7 +260,6 @@ function resizeOverlay() {
 }
 window.addEventListener('resize', resizeOverlay);
 
-// --- keyboard / VisualViewport offset ---
 function adjustKeyboard() {
     const vv = window.visualViewport;
     if (!vv) return;
@@ -284,7 +280,6 @@ askInput.addEventListener('blur', () => {
     setTimeout(adjustKeyboard, 100);
 });
 
-// --- rule-based IOU + centroid tracker (model-agnostic) ---
 function iou(a, b) {
     const [ax, ay, aw, ah] = a, [bx, by, bw, bh] = b;
     const x1 = Math.max(ax, bx), y1 = Math.max(ay, by);
@@ -330,8 +325,6 @@ function updateTracks(detections, ranFace) {
         }
     });
 
-    // Only age tracks whose detector actually ran this frame — the other
-    // group's boxes just hold their last known position until their turn.
     tracks.forEach((t, i) => {
         if (assigned.has(i)) return;
         const isFaceTrack = t.class === 'face';
@@ -344,7 +337,7 @@ function updateTracks(detections, ranFace) {
 function drawTracks() {
     overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
     tracks.forEach((t) => {
-        if (t.lastSeen > 0) return; // strictly live — hide immediately if not currently detected
+        if (t.lastSeen > 0) return;
         const [x, y, w, h] = toCanvasRect(t.box);
         const isLocked = t.id === lockedId;
         const isTarget = t === getCurrentTarget();
@@ -362,7 +355,6 @@ function drawTracks() {
     });
 }
 
-// --- targeting: locked track wins, else dominant (largest area, tiebreak by score), else null ---
 function getCurrentTarget() {
     const live = tracks.filter((t) => t.lastSeen === 0);
     if (live.length === 0) return null;
@@ -370,7 +362,7 @@ function getCurrentTarget() {
     if (lockedId !== null) {
         const locked = live.find((t) => t.id === lockedId);
         if (locked) return locked;
-        lockedId = null; // locked object left frame — fall through to dominant
+        lockedId = null;
     }
 
     return live.reduce((best, t) => {
@@ -382,7 +374,6 @@ function getCurrentTarget() {
     });
 }
 
-// --- 3x3 zone quantization to kill jitter in position descriptions ---
 function quantizeZone(box) {
     const [x, y, w, h] = box;
     const cx = (x + w / 2) / video.videoWidth;
@@ -400,7 +391,6 @@ function sizeDescriptor(box) {
     return 'far';
 }
 
-// --- geometry-only scene state, rebuilt fresh each call, always current, no history to manage ---
 function buildSceneState() {
     const live = tracks.filter((t) => t.lastSeen === 0);
     const target = getCurrentTarget();
@@ -416,14 +406,11 @@ function buildSceneState() {
     });
 
     return {
-        text: `Current scene:
-${lines.join('
-')}`,
+        text: `Current scene:\n${lines.join('\n')}`,
         target
     };
 }
 
-// --- crop the target region from the live video into the preview canvas (native pixels) ---
 function drawTargetPreview(target) {
     if (!target) {
         targetPreview.classList.remove('active');
@@ -431,7 +418,6 @@ function drawTargetPreview(target) {
         return;
     }
     const [x, y, w, h] = target.box;
-    // pad slightly so the crop isn't razor-tight to the box
     const pad = 0.15;
     const px = Math.max(0, x - w * pad);
     const py = Math.max(0, y - h * pad);
@@ -446,7 +432,6 @@ function drawTargetPreview(target) {
     targetLabel.classList.add('active');
 }
 
-// --- tap-to-lock: tap a box to lock it as the target, tap it again (or empty space) to release ---
 overlay.addEventListener('click', (e) => {
     const rect = overlay.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -465,9 +450,6 @@ overlay.addEventListener('click', (e) => {
     lockedId = (lockedId === hit.id) ? null : hit.id;
 });
 
-// --- Ask: builds the exact payload the VLM+Stef pipeline would receive.
-// No model wired yet — this just shows what would be sent, per the plan
-// to tune the bridge before adding inference on top. ---
 function handleAsk() {
     const question = askInput.value.trim();
     if (!question) return;
@@ -492,25 +474,22 @@ User question: "${question}"
     bridgeText.textContent = payload;
     bridgeDebug.classList.add('active');
     askInput.value = '';
-    askInput.blur(); // dismiss keyboard so user sees result
+    askInput.blur();
 }
 askBtn.addEventListener('click', handleAsk);
 askInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAsk(); });
 
-// --- close debug panel ---
 bridgeClose.addEventListener('click', (e) => {
     e.stopPropagation();
     bridgeDebug.classList.remove('active');
 });
 
-// --- moon boost toggle ---
 boostBtn.addEventListener('click', () => {
     boostOn = !boostOn;
     boostBtn.classList.toggle('active', boostOn);
     boostBtn.textContent = boostOn ? 'Boost ON' : 'Moon';
 });
 
-// --- detection loop: self-chaining, gated on completion (no pile-up) ---
 let frameCount = 0;
 async function detectLoop() {
     if (!running) return;
@@ -526,7 +505,6 @@ async function detectLoop() {
     frameCount++;
     const inferenceStart = performance.now();
 
-    // low-light boost: preprocess frame into offscreen canvas
     let source = video;
     if (boostOn) {
         if (boostCanvas.width !== video.videoWidth || boostCanvas.height !== video.videoHeight) {
@@ -599,7 +577,6 @@ async function loadModels() {
         }),
         FaceDetector.createFromOptions(vision, {
             baseOptions: {
-                // full-range: back camera / faces up to ~5m — short-range is selfie-only (<2m)
                 modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_full_range/float16/1/blaze_face_full_range.tflite",
                 delegate: "GPU"
             },
