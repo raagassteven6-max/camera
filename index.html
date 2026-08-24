@@ -41,6 +41,10 @@
         border-radius: 14px;
         font-size: 12px;
         color: #0f0;
+        max-width: 45vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
     #fps {
         background: rgba(0,0,0,0.55);
@@ -69,6 +73,8 @@
         display: flex; align-items: center; justify-content: center;
         background: #111;
         z-index: 30;
+        flex-direction: column;
+        gap: 12px;
     }
     #start-btn {
         padding: 16px 32px;
@@ -169,6 +175,37 @@
     }
     #bridge-close:active { background: rgba(255,255,255,0.3); }
     #bridge-text { padding-right: 28px; }
+
+    /* on-screen error log for when devtools aren't handy */
+    #err-log {
+        position: absolute;
+        top: 50%; left: 12px; right: 12px;
+        transform: translateY(-50%);
+        background: rgba(180,0,0,0.9);
+        color: #fff;
+        font-family: 'SF Mono', Menlo, monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        padding: 14px;
+        border-radius: 12px;
+        z-index: 40;
+        display: none;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 60vh;
+        overflow-y: auto;
+    }
+    #err-log.active { display: block; }
+    #err-log button {
+        margin-top: 10px;
+        padding: 8px 16px;
+        border: none;
+        border-radius: 8px;
+        background: #fff;
+        color: #900;
+        font-weight: 600;
+        cursor: pointer;
+    }
 </style>
 </head>
 <body>
@@ -177,13 +214,13 @@
     <canvas id="overlay"></canvas>
     <div id="hud-top">
         <div id="status">Loading…</div>
-        <button id="boost-btn">🌙</button>
+        <button id="boost-btn">Moon</button>
         <div id="fps">0 fps</div>
     </div>
     <canvas id="target-preview" width="80" height="80"></canvas>
     <div id="target-label"></div>
     <div id="bridge-debug">
-        <button id="bridge-close" aria-label="Close debug panel">✕</button>
+        <button id="bridge-close" aria-label="Close debug panel">X</button>
         <div id="bridge-text"></div>
     </div>
     <div id="ask-bar">
@@ -192,6 +229,13 @@
     </div>
     <div id="start-overlay">
         <button id="start-btn">Start Live Tracker</button>
+        <div style="color:#888;font-size:12px;text-align:center;max-width:260px;line-height:1.4;">
+            Needs camera access.<br>If nothing happens, check permission.
+        </div>
+    </div>
+    <div id="err-log">
+        <div id="err-text"></div>
+        <button id="err-dismiss">Dismiss</button>
     </div>
 </div>
 
@@ -217,7 +261,11 @@ const bridgeText = document.getElementById('bridge-text');
 const bridgeClose = document.getElementById('bridge-close');
 const askInput = document.getElementById('ask-input');
 const askBtn = document.getElementById('ask-btn');
+const askBar = document.getElementById('ask-bar');
 const boostBtn = document.getElementById('boost-btn');
+const errLog = document.getElementById('err-log');
+const errText = document.getElementById('err-text');
+const errDismiss = document.getElementById('err-dismiss');
 
 let lockedId = null;
 let boostOn = false;
@@ -232,6 +280,17 @@ const IOU_MATCH_THRESHOLD = 0.15;
 const MAX_LOST_FRAMES = 6;
 const MIN_SCORE = 0.6;
 
+// --- visible error helper (no devtools needed) ---
+function showErr(msg) {
+    console.error(msg);
+    errText.textContent = msg;
+    errLog.classList.add('active');
+    statusEl.textContent = 'Error';
+}
+window.addEventListener('error', (e) => showErr(e.message + '\n@' + (e.filename || '').slice(-30) + ':' + e.lineno));
+window.addEventListener('unhandledrejection', (e) => showErr('Unhandled: ' + (e.reason && e.reason.message ? e.reason.message : String(e.reason))));
+errDismiss.addEventListener('click', () => errLog.classList.remove('active'));
+
 // --- offscreen canvas for low-light boost ---
 const boostCanvas = document.createElement('canvas');
 const boostCtx = boostCanvas.getContext('2d', { willReadFrequently: false });
@@ -245,7 +304,7 @@ function tickFps() {
     fpsEl.textContent = `${frameTimes.length} fps`;
 }
 
-// --- coordinate mapping: video native pixels -> canvas (object-fit: cover aware) ---
+// --- coordinate mapping ---
 function getTransform() {
     const scale = Math.max(overlay.width / video.videoWidth, overlay.height / video.videoHeight);
     const offsetX = (video.videoWidth * scale - overlay.width) / 2;
@@ -265,6 +324,7 @@ window.addEventListener('resize', resizeOverlay);
 
 // --- keyboard / VisualViewport offset ---
 function adjustKeyboard() {
+    if (!askBar) return;
     const vv = window.visualViewport;
     if (!vv) return;
     const offset = Math.max(0, window.innerHeight - (vv.offsetTop + vv.height));
@@ -279,12 +339,12 @@ if (window.visualViewport) {
 }
 askInput.addEventListener('focus', adjustKeyboard);
 askInput.addEventListener('blur', () => {
-    askBar.style.transform = '';
-    bridgeDebug.style.transform = '';
-    if (window.visualViewport) setTimeout(adjustKeyboard, 100);
+    if (askBar) askBar.style.transform = '';
+    if (bridgeDebug) bridgeDebug.style.transform = '';
+    setTimeout(adjustKeyboard, 100);
 });
 
-// --- rule-based IOU + centroid tracker ---
+// --- tracker ---
 function iou(a, b) {
     const [ax, ay, aw, ah] = a, [bx, by, bw, bh] = b;
     const x1 = Math.max(ax, bx), y1 = Math.max(ay, by);
@@ -297,7 +357,6 @@ function iou(a, b) {
 
 function updateTracks(detections, ranFace) {
     const assigned = new Set();
-
     detections.forEach((det) => {
         let bestScore = 0, bestIdx = -1;
         tracks.forEach((t, i) => {
@@ -320,28 +379,19 @@ function updateTracks(detections, ranFace) {
             t.lastSeen = 0;
             assigned.add(bestIdx);
         } else {
-            tracks.push({
-                id: nextTrackId++,
-                class: det.class,
-                box: det.box,
-                score: det.score,
-                lastSeen: 0
-            });
+            tracks.push({ id: nextTrackId++, class: det.class, box: det.box, score: det.score, lastSeen: 0 });
         }
     });
-
     tracks.forEach((t, i) => {
         if (assigned.has(i)) return;
-        const isFaceTrack = t.class === 'face';
-        if (isFaceTrack === ranFace) t.lastSeen++;
+        if ((t.class === 'face') === ranFace) t.lastSeen++;
     });
-
     tracks = tracks.filter((t) => t.lastSeen <= MAX_LOST_FRAMES);
 }
 
 function drawTracks() {
     overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
-    const target = getCurrentTarget(); // compute once, not O(n²)
+    const target = getCurrentTarget();
     tracks.forEach((t) => {
         if (t.lastSeen > 0) return;
         const [x, y, w, h] = toCanvasRect(t.box);
@@ -351,7 +401,7 @@ function drawTracks() {
         overlayCtx.strokeStyle = color;
         overlayCtx.lineWidth = isLocked ? 3 : (isTarget ? 3 : 2);
         overlayCtx.strokeRect(x, y, w, h);
-        const label = `${isLocked ? '🔒 ' : ''}${t.class} #${t.id} ${(t.score * 100).toFixed(0)}%`;
+        const label = `${isLocked ? '[L] ' : ''}${t.class} #${t.id} ${(t.score * 100).toFixed(0)}%`;
         overlayCtx.font = '13px -apple-system, sans-serif';
         const textW = overlayCtx.measureText(label).width;
         overlayCtx.fillStyle = color;
@@ -361,17 +411,14 @@ function drawTracks() {
     });
 }
 
-// --- targeting ---
 function getCurrentTarget() {
     const live = tracks.filter((t) => t.lastSeen === 0);
     if (live.length === 0) return null;
-
     if (lockedId !== null) {
         const locked = live.find((t) => t.id === lockedId);
         if (locked) return locked;
         lockedId = null;
     }
-
     return live.reduce((best, t) => {
         const area = t.box[2] * t.box[3];
         const bestArea = best.box[2] * best.box[3];
@@ -381,15 +428,13 @@ function getCurrentTarget() {
     });
 }
 
-// --- 3x3 zone quantization ---
 function quantizeZone(box) {
     const [x, y, w, h] = box;
     const cx = (x + w / 2) / video.videoWidth;
     const cy = (y + h / 2) / video.videoHeight;
-    const col = cx < 1 / 3 ? 'left' : cx < 2 / 3 ? 'center' : 'right';
-    const row = cy < 1 / 3 ? 'top' : cy < 2 / 3 ? 'middle' : 'bottom';
-    if (row === 'middle' && col === 'center') return 'center';
-    return `${row}-${col}`;
+    const col = cx < 1/3 ? 'left' : cx < 2/3 ? 'center' : 'right';
+    const row = cy < 1/3 ? 'top' : cy < 2/3 ? 'middle' : 'bottom';
+    return (row === 'middle' && col === 'center') ? 'center' : `${row}-${col}`;
 }
 
 function sizeDescriptor(box) {
@@ -402,23 +447,17 @@ function sizeDescriptor(box) {
 function buildSceneState() {
     const live = tracks.filter((t) => t.lastSeen === 0);
     const target = getCurrentTarget();
-
-    if (live.length === 0) {
-        return { text: 'Nothing currently detected in view.', target: null };
-    }
-
+    if (live.length === 0) return { text: 'Nothing currently detected in view.', target: null };
     const lines = live.map((t) => {
         const marker = t === target ? ' [TARGET]' : '';
-        const lockMarker = t.id === lockedId ? ' [LOCKED BY USER]' : '';
-        return `${t.class} #${t.id} (${quantizeZone(t.box)}, ${sizeDescriptor(t.box)}, ${(t.score * 100).toFixed(0)}% confidence)${marker}${lockMarker}`;
+        const lockMarker = t.id === lockedId ? ' [LOCKED]' : '';
+        return `${t.class} #${t.id} (${quantizeZone(t.box)}, ${sizeDescriptor(t.box)}, ${(t.score * 100).toFixed(0)}%)${marker}${lockMarker}`;
     });
-
     return { text: `Current scene:
 ${lines.join('
 ')}`, target };
 }
 
-// --- target preview with cover-fit cropping (no stretch) ---
 function drawTargetPreview(target) {
     if (!target) {
         targetPreview.classList.remove('active');
@@ -434,110 +473,82 @@ function drawTargetPreview(target) {
     const pw = px2 - px;
     const ph = py2 - py;
 
-    // cover-fit into 80×80
     const srcAspect = pw / ph;
     const dstAspect = 1;
     let sx, sy, sw, sh;
     if (srcAspect > dstAspect) {
-        sh = ph;
-        sw = ph * dstAspect;
-        sx = px + (pw - sw) / 2;
-        sy = py;
+        sh = ph; sw = ph * dstAspect; sx = px + (pw - sw) / 2; sy = py;
     } else {
-        sw = pw;
-        sh = pw / dstAspect;
-        sx = px;
-        sy = py + (ph - sh) / 2;
+        sw = pw; sh = pw / dstAspect; sx = px; sy = py + (ph - sh) / 2;
     }
 
     targetPreviewCtx.clearRect(0, 0, 80, 80);
     targetPreviewCtx.drawImage(video, sx, sy, sw, sh, 0, 0, 80, 80);
     targetPreview.classList.add('active');
-
-    targetLabel.textContent = `${lockedId === target.id ? '🔒 locked' : 'auto-target'}: ${target.class} #${target.id}`;
+    targetLabel.textContent = `${lockedId === target.id ? 'locked' : 'target'}: ${target.class} #${target.id}`;
     targetLabel.classList.add('active');
 }
 
-// --- tap-to-lock ---
 overlay.addEventListener('click', (e) => {
     if (!running) return;
     const rect = overlay.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-
     const hit = tracks.find((t) => {
         if (t.lastSeen > 0) return false;
         const [bx, by, bw, bh] = toCanvasRect(t.box);
         return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
     });
-
-    if (!hit) {
-        lockedId = null;
-        return;
-    }
+    if (!hit) { lockedId = null; return; }
     lockedId = (lockedId === hit.id) ? null : hit.id;
 });
 
-// --- Ask ---
 function handleAsk() {
     const question = askInput.value.trim();
     if (!question) return;
-
     const scene = buildSceneState();
     drawTargetPreview(scene.target);
-
     const targetDesc = scene.target
         ? `${scene.target.class} #${scene.target.id} (${quantizeZone(scene.target.box)}, ${sizeDescriptor(scene.target.box)})`
-        : 'none — whole frame';
-
-    const payload =
-`[VLM call — would crop to: ${targetDesc}]
-[VLM description: <not wired yet>]
+        : 'none - whole frame';
+    const payload = `[VLM crop: ${targetDesc}]
+[VLM desc: <not wired>]
 
 ${scene.text}
 
-User question: "${question}"
+User: "${question}"
 
-[This full block → Stef]`;
-
+[-> Stef]`;
     bridgeText.textContent = payload;
     bridgeDebug.classList.add('active');
     askInput.value = '';
-    askInput.blur(); // dismiss keyboard so user sees result
+    askInput.blur();
 }
 askBtn.addEventListener('click', handleAsk);
 askInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAsk(); });
 
-// --- close debug panel ---
-bridgeClose.addEventListener('click', (e) => {
-    e.stopPropagation();
-    bridgeDebug.classList.remove('active');
-});
+bridgeClose.addEventListener('click', (e) => { e.stopPropagation(); bridgeDebug.classList.remove('active'); });
 
-// --- moon boost toggle ---
 boostBtn.addEventListener('click', () => {
     boostOn = !boostOn;
     boostBtn.classList.toggle('active', boostOn);
-    boostBtn.textContent = boostOn ? '🌙 Boost ON' : '🌙';
+    boostBtn.textContent = boostOn ? 'Boost ON' : 'Moon';
 });
 
 // --- detection loop ---
 let frameCount = 0;
 async function detectLoop() {
     if (!running) return;
-
     if (video.readyState < 2 || video.videoWidth === 0) {
         requestAnimationFrame(detectLoop);
         return;
     }
-
     const ts = performance.now();
     const detections = [];
     const runFace = frameCount % 2 === 1;
     frameCount++;
     const inferenceStart = performance.now();
 
-    // low-light boost: preprocess frame into offscreen canvas
     let source = video;
     if (boostOn) {
         if (boostCanvas.width !== video.videoWidth || boostCanvas.height !== video.videoHeight) {
@@ -557,11 +568,7 @@ async function detectLoop() {
                 const cat = d.categories[0];
                 if (cat.score < MIN_SCORE) return;
                 const bb = d.boundingBox;
-                detections.push({
-                    class: cat.categoryName,
-                    score: cat.score,
-                    box: [bb.originX, bb.originY, bb.width, bb.height]
-                });
+                detections.push({ class: cat.categoryName, score: cat.score, box: [bb.originX, bb.originY, bb.width, bb.height] });
             });
         } else {
             const faceResult = faceDetector.detectForVideo(source, ts);
@@ -569,26 +576,19 @@ async function detectLoop() {
                 const score = d.categories?.[0]?.score ?? 0;
                 if (score < MIN_SCORE) return;
                 const bb = d.boundingBox;
-                detections.push({
-                    class: 'face',
-                    score,
-                    box: [bb.originX, bb.originY, bb.width, bb.height]
-                });
+                detections.push({ class: 'face', score, box: [bb.originX, bb.originY, bb.width, bb.height] });
             });
         }
-
         const inferenceMs = (performance.now() - inferenceStart).toFixed(0);
-        statusEl.textContent = `Live — ${runFace ? 'face' : 'object'} model: ${inferenceMs}ms${boostOn ? ' +boost' : ''}`;
-
+        statusEl.textContent = `Live - ${runFace ? 'face' : 'obj'}: ${inferenceMs}ms${boostOn ? ' +boost' : ''}`;
         updateTracks(detections, runFace);
         drawTracks();
         drawTargetPreview(getCurrentTarget());
         tickFps();
     } catch (err) {
         console.error('Detect error:', err);
-        statusEl.textContent = 'Error: ' + err.message;
+        statusEl.textContent = 'Err: ' + err.message;
     }
-
     requestAnimationFrame(detectLoop);
 }
 
@@ -597,7 +597,6 @@ async function loadModels() {
     const vision = await FilesetResolver.forVisionTasks(
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm"
     );
-
     const [obj, face] = await Promise.all([
         ObjectDetector.createFromOptions(vision, {
             baseOptions: {
@@ -618,38 +617,40 @@ async function loadModels() {
     ]);
     objectDetector = obj;
     faceDetector = face;
-
     statusEl.textContent = 'Live';
 }
 
 async function start() {
+    console.log('[start] clicked');
     startOverlay.classList.add('hidden');
     statusEl.textContent = 'Starting camera…';
+    try {
+        // Use 'ideal' instead of strict 'environment' so laptops/front-only devices still work
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 }, height: { ideal: 480 } },
+            audio: false
+        });
+        video.srcObject = stream;
+        await new Promise((resolve) => {
+            video.addEventListener('loadedmetadata', () => { video.play(); resolve(); }, { once: true });
+        });
+        resizeOverlay();
+        await loadModels();
+        running = true;
+        requestAnimationFrame(detectLoop);
+        console.log('[start] running');
+    } catch (err) {
+        console.error('[start] failed:', err);
+        showErr('Camera start failed:
+' + err.name + ': ' + err.message + '
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
-        audio: false
-    });
-    video.srcObject = stream;
-
-    await new Promise((resolve) => {
-        video.addEventListener('loadedmetadata', () => { video.play(); resolve(); }, { once: true });
-    });
-
-    resizeOverlay();
-    await loadModels();
-
-    running = true;
-    requestAnimationFrame(detectLoop);
+Tip: allow camera permission, or try a device with a camera.');
+        startOverlay.classList.remove('hidden');
+    }
 }
 
-startBtn.addEventListener('click', () => {
-    start().catch((err) => {
-        console.error(err);
-        statusEl.textContent = 'Error: ' + err.message;
-        startOverlay.classList.remove('hidden');
-    });
-});
+startBtn.addEventListener('click', () => start());
+console.log('[init] script loaded');
 </script>
 </body>
 </html>
