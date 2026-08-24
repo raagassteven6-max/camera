@@ -2,19 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Live Tracker HUD</title>
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body {
-        width: 100%; height: 100%;
+        width: 100%; height: 100vh; height: 100dvh;
         background: #000;
         overflow: hidden;
         font-family: -apple-system, BlinkMacSystemFont, sans-serif;
     }
     #stage {
         position: relative;
-        width: 100vw; height: 100vh;
+        width: 100vw; height: 100vh; height: 100dvh;
     }
     #video {
         position: absolute; top: 0; left: 0;
@@ -91,7 +91,9 @@
 
     #ask-bar {
         position: absolute;
-        bottom: 12px; left: 12px; right: 12px;
+        bottom: calc(12px + env(safe-area-inset-bottom));
+        left: calc(12px + env(safe-area-inset-left));
+        right: calc(12px + env(safe-area-inset-right));
         display: flex; gap: 8px;
         z-index: 20;
     }
