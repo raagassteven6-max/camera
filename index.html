@@ -198,7 +198,7 @@
 import {
     FilesetResolver,
     ObjectDetector,
-    FaceDetector
+    FaceLandmarker
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
 
 const video = document.getElementById('video');
@@ -223,7 +223,7 @@ let lockedId = null;
 let boostOn = false;
 
 let objectDetector = null;
-let faceDetector = null;
+let faceLandmarker = null;
 let running = false;
 let tracks = [];
 let nextTrackId = 1;
@@ -252,6 +252,10 @@ function getTransform() {
 function toCanvasRect([vx, vy, vw, vh]) {
     const { scale, offsetX, offsetY } = getTransform();
     return [vx * scale - offsetX, vy * scale - offsetY, vw * scale, vh * scale];
+}
+function toCanvasPoint(vx, vy) {
+    const { scale, offsetX, offsetY } = getTransform();
+    return [vx * scale - offsetX, vy * scale - offsetY];
 }
 
 function resizeOverlay() {
@@ -312,6 +316,8 @@ function updateTracks(detections, ranFace) {
             const t = tracks[bestIdx];
             t.box = det.box;
             t.score = det.score;
+            t.landmarks = det.landmarks;
+            t.expression = det.expression;
             t.lastSeen = 0;
             assigned.add(bestIdx);
         } else {
@@ -320,6 +326,8 @@ function updateTracks(detections, ranFace) {
                 class: det.class,
                 box: det.box,
                 score: det.score,
+                landmarks: det.landmarks,
+                expression: det.expression,
                 lastSeen: 0
             });
         }
@@ -345,7 +353,20 @@ function drawTracks() {
         overlayCtx.strokeStyle = color;
         overlayCtx.lineWidth = isLocked ? 3 : (isTarget ? 3 : 2);
         overlayCtx.strokeRect(x, y, w, h);
-        const label = `${isLocked ? '🔒 ' : ''}${t.class} #${t.id} ${(t.score * 100).toFixed(0)}%`;
+
+        // Face mesh: draw the actual landmark points, not just the box
+        // derived from them — this is the visible proof landmarking is
+        // running rather than plain detection.
+        if (t.class === 'face' && t.landmarks) {
+            overlayCtx.fillStyle = color;
+            for (const p of t.landmarks) {
+                const [px, py] = toCanvasPoint(p.x * video.videoWidth, p.y * video.videoHeight);
+                overlayCtx.fillRect(px - 0.75, py - 0.75, 1.5, 1.5);
+            }
+        }
+
+        const expr = t.expression ? ` (${t.expression})` : '';
+        const label = `${isLocked ? '🔒 ' : ''}${t.class} #${t.id} ${(t.score * 100).toFixed(0)}%${expr}`;
         overlayCtx.font = '13px -apple-system, sans-serif';
         const textW = overlayCtx.measureText(label).width;
         overlayCtx.fillStyle = color;
@@ -402,7 +423,8 @@ function buildSceneState() {
     const lines = live.map((t) => {
         const marker = t === target ? ' [TARGET]' : '';
         const lockMarker = t.id === lockedId ? ' [LOCKED BY USER]' : '';
-        return `${t.class} #${t.id} (${quantizeZone(t.box)}, ${sizeDescriptor(t.box)}, ${(t.score * 100).toFixed(0)}% confidence)${marker}${lockMarker}`;
+        const exprPart = t.expression ? `, appears ${t.expression}` : '';
+        return `${t.class} #${t.id} (${quantizeZone(t.box)}, ${sizeDescriptor(t.box)}, ${(t.score * 100).toFixed(0)}% confidence${exprPart})${marker}${lockMarker}`;
     });
 
     return {
@@ -531,15 +553,45 @@ async function detectLoop() {
                 });
             });
         } else {
-            const faceResult = faceDetector.detectForVideo(source, ts);
-            faceResult.detections.forEach((d) => {
-                const score = d.categories?.[0]?.score ?? 0;
-                if (score < MIN_SCORE) return;
-                const bb = d.boundingBox;
+            const faceResult = faceLandmarker.detectForVideo(source, ts);
+            faceResult.faceLandmarks.forEach((landmarks, i) => {
+                // FaceLandmarker returns a cloud of ~478 normalized points per
+                // face, not a ready-made box — derive one from the point
+                // extents so it plugs into the same box-based tracker as
+                // everything else.
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                for (const p of landmarks) {
+                    const px = p.x * video.videoWidth;
+                    const py = p.y * video.videoHeight;
+                    if (px < minX) minX = px;
+                    if (px > maxX) maxX = px;
+                    if (py < minY) minY = py;
+                    if (py > maxY) maxY = py;
+                }
+
+                // No standalone per-face confidence number is exposed here —
+                // minFaceDetectionConfidence (set at load time, above) is what
+                // gates quality, so a returned landmark set already cleared
+                // that bar. Displaying 100% reflects that, not a fallback.
+                const score = 1;
+
+                // Bonus, free from the same model call: dominant expression,
+                // if any single blendshape clearly stands out from neutral.
+                let expression = null;
+                const shapes = faceResult.faceBlendshapes?.[i]?.categories;
+                if (shapes) {
+                    const top = shapes
+                        .filter((c) => c.categoryName !== '_neutral')
+                        .reduce((best, c) => (c.score > (best?.score ?? 0) ? c : best), null);
+                    if (top && top.score > 0.5) expression = top.categoryName;
+                }
+
                 detections.push({
                     class: 'face',
                     score,
-                    box: [bb.originX, bb.originY, bb.width, bb.height]
+                    box: [minX, minY, maxX - minX, maxY - minY],
+                    landmarks,
+                    expression
                 });
             });
         }
@@ -575,16 +627,25 @@ async function loadModels() {
             scoreThreshold: MIN_SCORE,
             maxResults: 10
         }),
-        FaceDetector.createFromOptions(vision, {
+        FaceLandmarker.createFromOptions(vision, {
             baseOptions: {
-                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_full_range/float16/1/blaze_face_full_range.tflite",
+                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
                 delegate: "GPU"
             },
-            runningMode: "VIDEO"
+            runningMode: "VIDEO",
+            numFaces: 5,
+            // Gate at the model level (same bar as MIN_SCORE) rather than
+            // filtering afterward — Face Landmarker doesn't return a simple
+            // per-face confidence number the way FaceDetector did.
+            minFaceDetectionConfidence: MIN_SCORE,
+            minFacePresenceConfidence: MIN_SCORE,
+            minTrackingConfidence: MIN_SCORE,
+            outputFaceBlendshapes: true,
+            outputFacialTransformationMatrixes: false
         })
     ]);
     objectDetector = obj;
-    faceDetector = face;
+    faceLandmarker = face;
 
     statusEl.textContent = 'Live';
 }
