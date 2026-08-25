@@ -105,6 +105,79 @@
     }
     #target-label.active { display: block; }
 
+    /* ---- NEW: Save-face button ---- */
+    #save-face-btn {
+        position: absolute;
+        top: 160px; left: 12px;
+        z-index: 20;
+        padding: 5px 12px;
+        border-radius: 10px;
+        border: none;
+        background: #FFD600;
+        color: #000;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        display: none;
+    }
+    #save-face-btn.active { display: block; }
+
+    /* ---- NEW: Name modal ---- */
+    #name-modal {
+        position: absolute; inset: 0;
+        background: rgba(0,0,0,0.8);
+        z-index: 40;
+        display: none;
+        align-items: center;
+        justify-content: center;
+    }
+    #name-modal.active { display: flex; }
+    #name-modal-content {
+        background: #222;
+        padding: 20px;
+        border-radius: 16px;
+        max-width: 280px;
+        width: 85%;
+        text-align: center;
+    }
+    #name-modal-content h3 {
+        color: #FFD600;
+        margin-bottom: 12px;
+        font-size: 16px;
+    }
+    #name-preview {
+        width: 112px;
+        height: 112px;
+        border-radius: 8px;
+        margin: 0 auto 12px;
+        background: #000;
+        display: block;
+    }
+    #name-input {
+        width: 100%;
+        padding: 10px;
+        border-radius: 10px;
+        border: none;
+        background: #333;
+        color: #fff;
+        font-size: 14px;
+        margin-bottom: 12px;
+    }
+    #name-modal-actions {
+        display: flex;
+        gap: 8px;
+    }
+    #name-modal-actions button {
+        flex: 1;
+        padding: 10px;
+        border-radius: 10px;
+        border: none;
+        font-size: 14px;
+        cursor: pointer;
+    }
+    #name-cancel { background: #444; color: #fff; }
+    #name-confirm { background: #FFD600; color: #000; font-weight: 600; }
+
     #ask-bar {
         position: absolute;
         bottom: calc(12px + env(safe-area-inset-bottom));
@@ -181,6 +254,18 @@
     </div>
     <canvas id="target-preview" width="80" height="80"></canvas>
     <div id="target-label"></div>
+    <button id="save-face-btn">Save Face</button>
+    <div id="name-modal">
+        <div id="name-modal-content">
+            <h3>Name this face</h3>
+            <canvas id="name-preview" width="112" height="112"></canvas>
+            <input id="name-input" type="text" placeholder="Enter name..." maxlength="30">
+            <div id="name-modal-actions">
+                <button id="name-cancel">Cancel</button>
+                <button id="name-confirm">Save</button>
+            </div>
+        </div>
+    </div>
     <div id="bridge-debug">
         <button id="bridge-close" aria-label="Close debug panel">X</button>
         <div id="bridge-text"></div>
@@ -198,7 +283,8 @@
 import {
     FilesetResolver,
     ObjectDetector,
-    FaceLandmarker
+    FaceLandmarker,
+    ImageEmbedder
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
 
 const video = document.getElementById('video');
@@ -218,12 +304,19 @@ const askInput = document.getElementById('ask-input');
 const askBtn = document.getElementById('ask-btn');
 const askBar = document.getElementById('ask-bar');
 const boostBtn = document.getElementById('boost-btn');
+const saveFaceBtn = document.getElementById('save-face-btn');
+const nameModal = document.getElementById('name-modal');
+const nameInput = document.getElementById('name-input');
+const nameConfirm = document.getElementById('name-confirm');
+const nameCancel = document.getElementById('name-cancel');
+const namePreview = document.getElementById('name-preview');
 
 let lockedId = null;
 let boostOn = false;
 
 let objectDetector = null;
 let faceLandmarker = null;
+let imageEmbedder = null;
 let running = false;
 let tracks = [];
 let nextTrackId = 1;
@@ -232,15 +325,152 @@ const IOU_MATCH_THRESHOLD = 0.15;
 const MAX_LOST_FRAMES = 6;
 const MIN_SCORE = 0.6;
 
+const DB_NAME = 'FaceVault';
+const DB_VERSION = 1;
+const DB_STORE = 'faces';
+const ALIGN_SIZE = 112;
+const RECOGNITION_THRESHOLD = 0.60;
+let faceDB = null;
+let storedFaces = [];
+let recognitionCache = new Map();
+let pendingSave = null;
+let embedTimestamp = 0; /* CHANGED — monotonic counter for embedder */
+
 const boostCanvas = document.createElement('canvas');
 const boostCtx = boostCanvas.getContext('2d', { willReadFrequently: false });
 
 let frameTimes = [];
+let frameCount = 0;
+
 function tickFps() {
     const now = performance.now();
     frameTimes.push(now);
     frameTimes = frameTimes.filter((t) => now - t < 1000);
     fpsEl.textContent = `${frameTimes.length} fps`;
+}
+
+function openFaceDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => resolve(req.result);
+        req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(DB_STORE)) {
+                const store = db.createObjectStore(DB_STORE, { keyPath: 'id', autoIncrement: true });
+                store.createIndex('name', 'name', { unique: false });
+            }
+        };
+    });
+}
+
+async function loadStoredFaces() {
+    if (!faceDB) return;
+    const tx = faceDB.transaction(DB_STORE, 'readonly');
+    const store = tx.objectStore(DB_STORE);
+    const req = store.getAll();
+    storedFaces = await new Promise((resolve, reject) => {
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+/* CHANGED — now throws so caller knows it failed */
+async function saveFaceRecord(name, embedding, thumbnail) {
+    if (!faceDB) throw new Error('IndexedDB unavailable');
+    const record = {
+        name,
+        embedding: Array.from(embedding),
+        thumbnail,
+        createdAt: Date.now()
+    };
+    const tx = faceDB.transaction(DB_STORE, 'readwrite');
+    const store = tx.objectStore(DB_STORE);
+    await new Promise((resolve, reject) => {
+        const req = store.add(record);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+    await loadStoredFaces();
+}
+
+function alignFaceFromLandmarks(source, landmarks) {
+    const leftEye = landmarks[33];
+    const rightEye = landmarks[263];
+    const lx = leftEye.x * source.videoWidth;
+    const ly = leftEye.y * source.videoHeight;
+    const rx = rightEye.x * source.videoWidth;
+    const ry = rightEye.y * source.videoHeight;
+    const dx = rx - lx;
+    const dy = ry - ly;
+    const angle = Math.atan2(dy, dx);
+    const dist = Math.hypot(dx, dy);
+    const desiredDist = ALIGN_SIZE * 0.35;
+    const scale = desiredDist / dist;
+    const centerX = (lx + rx) / 2;
+    const centerY = (ly + ry) / 2;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = ALIGN_SIZE;
+    canvas.height = ALIGN_SIZE;
+    const ctx = canvas.getContext('2d');
+    ctx.translate(ALIGN_SIZE / 2, ALIGN_SIZE / 2);
+    ctx.scale(scale, scale);
+    ctx.rotate(-angle);
+    ctx.translate(-centerX, -centerY);
+    ctx.drawImage(source, 0, 0, source.videoWidth, source.videoHeight);
+    return canvas;
+}
+
+/* CHANGED — guaranteed-increasing timestamp instead of performance.now() */
+function getNextEmbedTimestamp() {
+    embedTimestamp += 1;
+    return embedTimestamp;
+}
+
+async function getFaceEmbedding(alignedCanvas) {
+    if (!imageEmbedder) return null;
+    try {
+        let result;
+        if (imageEmbedder.embedForVideo) {
+            result = imageEmbedder.embedForVideo(alignedCanvas, getNextEmbedTimestamp());
+        } else if (imageEmbedder.embed) {
+            result = imageEmbedder.embed(alignedCanvas);
+        } else {
+            return null;
+        }
+        const emb = result.embeddings[0].floatEmbedding;
+        return new Float32Array(emb);
+    } catch (e) {
+        console.error('Embedding error:', e);
+        return null;
+    }
+}
+
+function cosineSimilarity(a, b) {
+    let dot = 0, na = 0, nb = 0;
+    for (let i = 0; i < a.length; i++) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+function recognizeFace(embedding) {
+    if (!storedFaces.length) return null;
+    let best = null, bestScore = -1;
+    for (const f of storedFaces) {
+        const score = cosineSimilarity(embedding, new Float32Array(f.embedding));
+        if (score > bestScore) {
+            bestScore = score;
+            best = f;
+        }
+    }
+    if (bestScore >= RECOGNITION_THRESHOLD) {
+        return { name: best.name, similarity: bestScore, id: best.id };
+    }
+    return null;
 }
 
 function getTransform() {
@@ -342,21 +572,20 @@ function updateTracks(detections, ranFace) {
     tracks = tracks.filter((t) => t.lastSeen <= MAX_LOST_FRAMES);
 }
 
+/* CHANGED — cache getCurrentTarget() once instead of once per track */
 function drawTracks() {
     overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+    const currentTarget = getCurrentTarget();
     tracks.forEach((t) => {
         if (t.lastSeen > 0) return;
         const [x, y, w, h] = toCanvasRect(t.box);
         const isLocked = t.id === lockedId;
-        const isTarget = t === getCurrentTarget();
+        const isTarget = t === currentTarget;
         const color = isLocked ? '#FFD600' : (t.class === 'face' ? '#FF3D9A' : '#00E5FF');
         overlayCtx.strokeStyle = color;
         overlayCtx.lineWidth = isLocked ? 3 : (isTarget ? 3 : 2);
         overlayCtx.strokeRect(x, y, w, h);
 
-        // Face mesh: draw the actual landmark points, not just the box
-        // derived from them — this is the visible proof landmarking is
-        // running rather than plain detection.
         if (t.class === 'face' && t.landmarks) {
             overlayCtx.fillStyle = color;
             for (const p of t.landmarks) {
@@ -366,7 +595,10 @@ function drawTracks() {
         }
 
         const expr = t.expression ? ` (${t.expression})` : '';
-        const label = `${isLocked ? '🔒 ' : ''}${t.class} #${t.id} ${(t.score * 100).toFixed(0)}%${expr}`;
+        const displayName = (t.class === 'face' && t.recognition)
+            ? `👤 ${t.recognition.name}`
+            : `${t.class} #${t.id}`;
+        const label = `${isLocked ? '🔒 ' : ''}${displayName} ${(t.score * 100).toFixed(0)}%${expr}`;
         overlayCtx.font = '13px -apple-system, sans-serif';
         const textW = overlayCtx.measureText(label).width;
         overlayCtx.fillStyle = color;
@@ -424,7 +656,8 @@ function buildSceneState() {
         const marker = t === target ? ' [TARGET]' : '';
         const lockMarker = t.id === lockedId ? ' [LOCKED BY USER]' : '';
         const exprPart = t.expression ? `, appears ${t.expression}` : '';
-        return `${t.class} #${t.id} (${quantizeZone(t.box)}, ${sizeDescriptor(t.box)}, ${(t.score * 100).toFixed(0)}% confidence${exprPart})${marker}${lockMarker}`;
+        const recogPart = t.recognition ? `, recognized as ${t.recognition.name}` : '';
+        return `${t.class} #${t.id} (${quantizeZone(t.box)}, ${sizeDescriptor(t.box)}, ${(t.score * 100).toFixed(0)}% confidence${exprPart}${recogPart})${marker}${lockMarker}`;
     });
 
     return {
@@ -450,8 +683,18 @@ function drawTargetPreview(target) {
     targetPreviewCtx.drawImage(video, px, py, pw, ph, 0, 0, 80, 80);
     targetPreview.classList.add('active');
 
-    targetLabel.textContent = `${lockedId === target.id ? '🔒 locked' : 'auto-target'}: ${target.class} #${target.id}`;
+    const name = target.recognition?.name;
+    targetLabel.textContent = `${lockedId === target.id ? '🔒 locked' : 'auto-target'}: ${name || target.class + ' #' + target.id}`;
     targetLabel.classList.add('active');
+}
+
+function updateSaveButton() {
+    const locked = tracks.find((t) => t.id === lockedId && t.lastSeen === 0);
+    if (locked && locked.class === 'face') {
+        saveFaceBtn.classList.add('active');
+    } else {
+        saveFaceBtn.classList.remove('active');
+    }
 }
 
 overlay.addEventListener('click', (e) => {
@@ -512,7 +755,56 @@ boostBtn.addEventListener('click', () => {
     boostBtn.textContent = boostOn ? 'Boost ON' : 'Moon';
 });
 
-let frameCount = 0;
+async function handleSaveFace() {
+    const locked = tracks.find((t) => t.id === lockedId && t.lastSeen === 0);
+    if (!locked || locked.class !== 'face' || !locked.landmarks) {
+        statusEl.textContent = 'Lock a face first';
+        return;
+    }
+    statusEl.textContent = 'Computing embedding…';
+    const aligned = alignFaceFromLandmarks(video, locked.landmarks);
+    const embedding = await getFaceEmbedding(aligned);
+    if (!embedding) {
+        statusEl.textContent = 'Embedding failed';
+        return;
+    }
+    pendingSave = { track: locked, alignedCanvas: aligned, embedding };
+    const previewCtx = namePreview.getContext('2d');
+    previewCtx.clearRect(0, 0, 112, 112);
+    previewCtx.drawImage(aligned, 0, 0, 112, 112);
+    nameModal.classList.add('active');
+    nameInput.value = '';
+    nameInput.focus();
+}
+
+/* CHANGED — catches DB failures and surfaces them; always clears pendingSave */
+async function handleNameConfirm() {
+    const name = nameInput.value.trim();
+    if (!name || !pendingSave) return;
+    const thumbnail = pendingSave.alignedCanvas.toDataURL('image/jpeg', 0.85);
+    try {
+        await saveFaceRecord(name, pendingSave.embedding, thumbnail);
+        pendingSave.track.recognition = { name, similarity: 1.0 };
+        statusEl.textContent = `Saved face: ${name}`;
+    } catch (err) {
+        console.error('Save failed:', err);
+        statusEl.textContent = 'Save failed — storage blocked or DB error';
+    } finally {
+        pendingSave = null;
+        nameModal.classList.remove('active');
+    }
+}
+
+saveFaceBtn.addEventListener('click', handleSaveFace);
+nameConfirm.addEventListener('click', handleNameConfirm);
+nameCancel.addEventListener('click', () => {
+    pendingSave = null;
+    nameModal.classList.remove('active');
+});
+nameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleNameConfirm();
+});
+
 async function detectLoop() {
     if (!running) return;
 
@@ -555,10 +847,6 @@ async function detectLoop() {
         } else {
             const faceResult = faceLandmarker.detectForVideo(source, ts);
             faceResult.faceLandmarks.forEach((landmarks, i) => {
-                // FaceLandmarker returns a cloud of ~478 normalized points per
-                // face, not a ready-made box — derive one from the point
-                // extents so it plugs into the same box-based tracker as
-                // everything else.
                 let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
                 for (const p of landmarks) {
                     const px = p.x * video.videoWidth;
@@ -568,15 +856,7 @@ async function detectLoop() {
                     if (py < minY) minY = py;
                     if (py > maxY) maxY = py;
                 }
-
-                // No standalone per-face confidence number is exposed here —
-                // minFaceDetectionConfidence (set at load time, above) is what
-                // gates quality, so a returned landmark set already cleared
-                // that bar. Displaying 100% reflects that, not a fallback.
                 const score = 1;
-
-                // Bonus, free from the same model call: dominant expression,
-                // if any single blendshape clearly stands out from neutral.
                 let expression = null;
                 const shapes = faceResult.faceBlendshapes?.[i]?.categories;
                 if (shapes) {
@@ -600,8 +880,36 @@ async function detectLoop() {
         statusEl.textContent = `Live — ${runFace ? 'face' : 'object'} model: ${inferenceMs}ms${boostOn ? ' +boost' : ''}`;
 
         updateTracks(detections, runFace);
+
+        if (runFace && storedFaces.length > 0) {
+            const faceTracks = tracks.filter((t) => t.class === 'face' && t.lastSeen === 0);
+            let processed = 0;
+            for (const t of faceTracks) {
+                const cache = recognitionCache.get(t.id);
+                if (cache && frameCount - cache.frameCount < 10) {
+                    t.recognition = cache.recognition;
+                    continue;
+                }
+                if (processed >= 2) continue;
+                if (t.landmarks) {
+                    const aligned = alignFaceFromLandmarks(video, t.landmarks);
+                    const embedding = await getFaceEmbedding(aligned);
+                    if (embedding) {
+                        const match = recognizeFace(embedding);
+                        t.recognition = match;
+                        recognitionCache.set(t.id, { embedding, recognition: match, frameCount });
+                    }
+                    processed++;
+                }
+            }
+            for (const [id, data] of recognitionCache) {
+                if (frameCount - data.frameCount > 30) recognitionCache.delete(id);
+            }
+        }
+
         drawTracks();
         drawTargetPreview(getCurrentTarget());
+        updateSaveButton();
         tickFps();
     } catch (err) {
         console.error('Detect error:', err);
@@ -617,7 +925,7 @@ async function loadModels() {
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm"
     );
 
-    const [obj, face] = await Promise.all([
+    const [obj, face, embedder] = await Promise.all([
         ObjectDetector.createFromOptions(vision, {
             baseOptions: {
                 modelAssetPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite",
@@ -634,18 +942,24 @@ async function loadModels() {
             },
             runningMode: "VIDEO",
             numFaces: 5,
-            // Gate at the model level (same bar as MIN_SCORE) rather than
-            // filtering afterward — Face Landmarker doesn't return a simple
-            // per-face confidence number the way FaceDetector did.
             minFaceDetectionConfidence: MIN_SCORE,
             minFacePresenceConfidence: MIN_SCORE,
             minTrackingConfidence: MIN_SCORE,
             outputFaceBlendshapes: true,
             outputFacialTransformationMatrixes: false
+        }),
+        ImageEmbedder.createFromOptions(vision, {
+            baseOptions: {
+                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_small/float32/1/mobilenet_v3_small.tflite",
+                delegate: "GPU"
+            },
+            runningMode: "VIDEO",
+            quantize: false
         })
     ]);
     objectDetector = obj;
     faceLandmarker = face;
+    imageEmbedder = embedder;
 
     statusEl.textContent = 'Live';
 }
@@ -665,6 +979,14 @@ async function start() {
     });
 
     resizeOverlay();
+
+    try {
+        faceDB = await openFaceDB();
+        await loadStoredFaces();
+    } catch (e) {
+        console.error('Face DB error:', e);
+    }
+
     await loadModels();
 
     running = true;
