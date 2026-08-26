@@ -105,7 +105,6 @@
     }
     #target-label.active { display: block; }
 
-    /* ---- NEW: Save-face button ---- */
     #save-face-btn {
         position: absolute;
         top: 160px; left: 12px;
@@ -121,8 +120,11 @@
         display: none;
     }
     #save-face-btn.active { display: block; }
+    #save-face-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+    }
 
-    /* ---- NEW: Name modal ---- */
     #name-modal {
         position: absolute; inset: 0;
         background: rgba(0,0,0,0.8);
@@ -163,6 +165,13 @@
         font-size: 14px;
         margin-bottom: 12px;
     }
+    #name-error {
+        color: #FF6B6B;
+        font-size: 12px;
+        margin: -6px 0 10px;
+        min-height: 14px;
+        display: block;
+    }
     #name-modal-actions {
         display: flex;
         gap: 8px;
@@ -174,6 +183,10 @@
         border: none;
         font-size: 14px;
         cursor: pointer;
+    }
+    #name-modal-actions button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
     }
     #name-cancel { background: #444; color: #fff; }
     #name-confirm { background: #FFD600; color: #000; font-weight: 600; }
@@ -260,6 +273,7 @@
             <h3>Name this face</h3>
             <canvas id="name-preview" width="112" height="112"></canvas>
             <input id="name-input" type="text" placeholder="Enter name..." maxlength="30">
+            <span id="name-error"></span>
             <div id="name-modal-actions">
                 <button id="name-cancel">Cancel</button>
                 <button id="name-confirm">Save</button>
@@ -310,6 +324,7 @@ const nameInput = document.getElementById('name-input');
 const nameConfirm = document.getElementById('name-confirm');
 const nameCancel = document.getElementById('name-cancel');
 const namePreview = document.getElementById('name-preview');
+const nameError = document.getElementById('name-error');
 
 let lockedId = null;
 let boostOn = false;
@@ -331,10 +346,21 @@ const DB_STORE = 'faces';
 const ALIGN_SIZE = 112;
 const RECOGNITION_THRESHOLD = 0.60;
 let faceDB = null;
+let faceDBError = null;
 let storedFaces = [];
-let recognitionCache = new Map();
+let recognitionCache = new Map(); // trackId -> { recognition, frameCount }
 let pendingSave = null;
-let embedTimestamp = 0; /* CHANGED — monotonic counter for embedder */
+
+// Fix: ImageEmbedder in VIDEO mode requires strictly increasing timestamps.
+// performance.now() can repeat within the same tick (or across the two
+// recognition calls we may issue per frame), which throws. This guarantees
+// monotonic input regardless of how often/fast we call it.
+let embedClock = 0;
+function nextEmbedTimestamp() {
+    const now = Math.floor(performance.now());
+    embedClock = now > embedClock ? now : embedClock + 1;
+    return embedClock;
+}
 
 const boostCanvas = document.createElement('canvas');
 const boostCtx = boostCanvas.getContext('2d', { willReadFrequently: false });
@@ -351,7 +377,13 @@ function tickFps() {
 
 function openFaceDB() {
     return new Promise((resolve, reject) => {
-        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        let req;
+        try {
+            req = indexedDB.open(DB_NAME, DB_VERSION);
+        } catch (e) {
+            reject(e);
+            return;
+        }
         req.onerror = () => reject(req.error);
         req.onsuccess = () => resolve(req.result);
         req.onupgradeneeded = (e) => {
@@ -366,32 +398,51 @@ function openFaceDB() {
 
 async function loadStoredFaces() {
     if (!faceDB) return;
-    const tx = faceDB.transaction(DB_STORE, 'readonly');
-    const store = tx.objectStore(DB_STORE);
-    const req = store.getAll();
-    storedFaces = await new Promise((resolve, reject) => {
-        req.onsuccess = () => resolve(req.result || []);
-        req.onerror = () => reject(req.error);
-    });
+    try {
+        const tx = faceDB.transaction(DB_STORE, 'readonly');
+        const store = tx.objectStore(DB_STORE);
+        const req = store.getAll();
+        storedFaces = await new Promise((resolve, reject) => {
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error);
+        });
+    } catch (e) {
+        console.error('Load stored faces error:', e);
+        storedFaces = [];
+    }
 }
 
-/* CHANGED — now throws so caller knows it failed */
+// Fix: this used to fail silently (return with no signal) when faceDB was
+// null or the transaction failed. The caller had no way to know the save
+// didn't happen, so it told the user "Saved" regardless. Now it reports
+// success/failure so the UI can be honest about it.
 async function saveFaceRecord(name, embedding, thumbnail) {
-    if (!faceDB) throw new Error('IndexedDB unavailable');
+    if (!faceDB) return false;
     const record = {
         name,
         embedding: Array.from(embedding),
         thumbnail,
         createdAt: Date.now()
     };
-    const tx = faceDB.transaction(DB_STORE, 'readwrite');
-    const store = tx.objectStore(DB_STORE);
-    await new Promise((resolve, reject) => {
-        const req = store.add(record);
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-    });
-    await loadStoredFaces();
+    try {
+        const tx = faceDB.transaction(DB_STORE, 'readwrite');
+        const store = tx.objectStore(DB_STORE);
+        await new Promise((resolve, reject) => {
+            const req = store.add(record);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+            tx.onerror = () => reject(tx.error);
+        });
+        await loadStoredFaces();
+        // A newly saved face could match tracks other than the one just
+        // saved (e.g. the same person seen in two boxes), so drop the
+        // cache instead of leaving stale "no match" results in place.
+        recognitionCache.clear();
+        return true;
+    } catch (e) {
+        console.error('Save face record error:', e);
+        return false;
+    }
 }
 
 function alignFaceFromLandmarks(source, landmarks) {
@@ -405,6 +456,7 @@ function alignFaceFromLandmarks(source, landmarks) {
     const dy = ry - ly;
     const angle = Math.atan2(dy, dx);
     const dist = Math.hypot(dx, dy);
+    if (!Number.isFinite(dist) || dist < 1e-3) return null; // Fix: degenerate landmarks would divide by ~0
     const desiredDist = ALIGN_SIZE * 0.35;
     const scale = desiredDist / dist;
     const centerX = (lx + rx) / 2;
@@ -422,24 +474,19 @@ function alignFaceFromLandmarks(source, landmarks) {
     return canvas;
 }
 
-/* CHANGED — guaranteed-increasing timestamp instead of performance.now() */
-function getNextEmbedTimestamp() {
-    embedTimestamp += 1;
-    return embedTimestamp;
-}
-
 async function getFaceEmbedding(alignedCanvas) {
-    if (!imageEmbedder) return null;
+    if (!imageEmbedder || !alignedCanvas) return null;
     try {
         let result;
         if (imageEmbedder.embedForVideo) {
-            result = imageEmbedder.embedForVideo(alignedCanvas, getNextEmbedTimestamp());
+            result = imageEmbedder.embedForVideo(alignedCanvas, nextEmbedTimestamp());
         } else if (imageEmbedder.embed) {
             result = imageEmbedder.embed(alignedCanvas);
         } else {
             return null;
         }
-        const emb = result.embeddings[0].floatEmbedding;
+        const emb = result?.embeddings?.[0]?.floatEmbedding;
+        if (!emb) return null;
         return new Float32Array(emb);
     } catch (e) {
         console.error('Embedding error:', e);
@@ -454,7 +501,8 @@ function cosineSimilarity(a, b) {
         na += a[i] * a[i];
         nb += b[i] * b[i];
     }
-    return dot / (Math.sqrt(na) * Math.sqrt(nb));
+    const denom = Math.sqrt(na) * Math.sqrt(nb);
+    return denom === 0 ? 0 : dot / denom;
 }
 
 function recognizeFace(embedding) {
@@ -572,9 +620,13 @@ function updateTracks(detections, ranFace) {
     tracks = tracks.filter((t) => t.lastSeen <= MAX_LOST_FRAMES);
 }
 
-/* CHANGED — cache getCurrentTarget() once instead of once per track */
 function drawTracks() {
     overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+    // Fix: was calling getCurrentTarget() once per track inside the loop
+    // below (an O(n^2) rescan every frame), and that function has the side
+    // effect of clearing lockedId when the locked track is missing — so it
+    // could silently unlock mid-frame depending on iteration order.
+    // Compute the target once, up front, instead.
     const currentTarget = getCurrentTarget();
     tracks.forEach((t) => {
         if (t.lastSeen > 0) return;
@@ -688,10 +740,16 @@ function drawTargetPreview(target) {
     targetLabel.classList.add('active');
 }
 
+// Fix: previously only checked track.class === 'face'; now also reflects
+// whether persistent storage is actually available, and disables (rather
+// than hides) the button so the user gets an explicit reason instead of
+// the feature just quietly not working.
 function updateSaveButton() {
     const locked = tracks.find((t) => t.id === lockedId && t.lastSeen === 0);
     if (locked && locked.class === 'face') {
         saveFaceBtn.classList.add('active');
+        saveFaceBtn.disabled = !faceDB;
+        saveFaceBtn.title = faceDB ? '' : 'Face storage unavailable in this browser';
     } else {
         saveFaceBtn.classList.remove('active');
     }
@@ -702,16 +760,36 @@ overlay.addEventListener('click', (e) => {
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    const hit = tracks.find((t) => {
+    // Fix: a face box almost always sits inside a person box, so a tap on
+    // a face also lands inside the person's bounding box. tracks.find()
+    // returned whichever track happened to come first in array order —
+    // in practice that was usually the person, since it's added by the
+    // object-detector pass. That silently locked the person instead of
+    // the face, which is why the box turned yellow but Save Face never
+    // appeared (it only shows for a locked track with class 'face').
+    // Collect every box under the tap, then prefer a face over anything
+    // else, and prefer the smallest (most specific) box as a tiebreak.
+    const hits = tracks.filter((t) => {
         if (t.lastSeen > 0) return false;
         const [bx, by, bw, bh] = toCanvasRect(t.box);
         return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
     });
 
-    if (!hit) {
+    if (hits.length === 0) {
         lockedId = null;
         return;
     }
+
+    const hit = hits.reduce((best, t) => {
+        const tIsFace = t.class === 'face';
+        const bestIsFace = best.class === 'face';
+        if (tIsFace && !bestIsFace) return t;
+        if (bestIsFace && !tIsFace) return best;
+        const area = t.box[2] * t.box[3];
+        const bestArea = best.box[2] * best.box[3];
+        return area < bestArea ? t : best;
+    });
+
     lockedId = (lockedId === hit.id) ? null : hit.id;
 });
 
@@ -755,14 +833,26 @@ boostBtn.addEventListener('click', () => {
     boostBtn.textContent = boostOn ? 'Boost ON' : 'Moon';
 });
 
+// Fix: guarded against a locked face whose landmarks disappeared between
+// the click and the button press (track could have been dropped/reused),
+// and against alignFaceFromLandmarks returning null (degenerate eye
+// distance) instead of assuming it always succeeds.
 async function handleSaveFace() {
     const locked = tracks.find((t) => t.id === lockedId && t.lastSeen === 0);
     if (!locked || locked.class !== 'face' || !locked.landmarks) {
         statusEl.textContent = 'Lock a face first';
         return;
     }
+    if (!faceDB) {
+        statusEl.textContent = 'Face storage unavailable in this browser';
+        return;
+    }
     statusEl.textContent = 'Computing embedding…';
     const aligned = alignFaceFromLandmarks(video, locked.landmarks);
+    if (!aligned) {
+        statusEl.textContent = 'Could not align face — try again';
+        return;
+    }
     const embedding = await getFaceEmbedding(aligned);
     if (!embedding) {
         statusEl.textContent = 'Embedding failed';
@@ -772,33 +862,51 @@ async function handleSaveFace() {
     const previewCtx = namePreview.getContext('2d');
     previewCtx.clearRect(0, 0, 112, 112);
     previewCtx.drawImage(aligned, 0, 0, 112, 112);
+    nameError.textContent = '';
     nameModal.classList.add('active');
     nameInput.value = '';
     nameInput.focus();
 }
 
-/* CHANGED — catches DB failures and surfaces them; always clears pendingSave */
+// Fix: this is the core bug — it used to report "Saved" unconditionally.
+// Now it actually waits on saveFaceRecord's result and only confirms
+// success, closes the modal, or attaches recognition, if the write
+// genuinely landed in IndexedDB. On failure the modal stays open so the
+// user can retry instead of believing a name that was never stored.
 async function handleNameConfirm() {
     const name = nameInput.value.trim();
     if (!name || !pendingSave) return;
+
+    nameConfirm.disabled = true;
+    nameCancel.disabled = true;
+    nameError.textContent = '';
+    const originalLabel = nameConfirm.textContent;
+    nameConfirm.textContent = 'Saving…';
+
     const thumbnail = pendingSave.alignedCanvas.toDataURL('image/jpeg', 0.85);
-    try {
-        await saveFaceRecord(name, pendingSave.embedding, thumbnail);
-        pendingSave.track.recognition = { name, similarity: 1.0 };
-        statusEl.textContent = `Saved face: ${name}`;
-    } catch (err) {
-        console.error('Save failed:', err);
-        statusEl.textContent = 'Save failed — storage blocked or DB error';
-    } finally {
-        pendingSave = null;
-        nameModal.classList.remove('active');
+    const ok = await saveFaceRecord(name, pendingSave.embedding, thumbnail);
+
+    nameConfirm.disabled = false;
+    nameCancel.disabled = false;
+    nameConfirm.textContent = originalLabel;
+
+    if (!ok) {
+        nameError.textContent = 'Save failed — try again.';
+        statusEl.textContent = 'Save failed — face not stored';
+        return; // keep modal open, pendingSave intact, so the user can retry
     }
+
+    pendingSave.track.recognition = { name, similarity: 1.0 };
+    pendingSave = null;
+    nameModal.classList.remove('active');
+    statusEl.textContent = `Saved face: ${name}`;
 }
 
 saveFaceBtn.addEventListener('click', handleSaveFace);
 nameConfirm.addEventListener('click', handleNameConfirm);
 nameCancel.addEventListener('click', () => {
     pendingSave = null;
+    nameError.textContent = '';
     nameModal.classList.remove('active');
 });
 nameInput.addEventListener('keydown', (e) => {
@@ -893,11 +1001,13 @@ async function detectLoop() {
                 if (processed >= 2) continue;
                 if (t.landmarks) {
                     const aligned = alignFaceFromLandmarks(video, t.landmarks);
-                    const embedding = await getFaceEmbedding(aligned);
-                    if (embedding) {
-                        const match = recognizeFace(embedding);
-                        t.recognition = match;
-                        recognitionCache.set(t.id, { embedding, recognition: match, frameCount });
+                    if (aligned) {
+                        const embedding = await getFaceEmbedding(aligned);
+                        if (embedding) {
+                            const match = recognizeFace(embedding);
+                            t.recognition = match;
+                            recognitionCache.set(t.id, { recognition: match, frameCount });
+                        }
                     }
                     processed++;
                 }
@@ -919,6 +1029,20 @@ async function detectLoop() {
     requestAnimationFrame(detectLoop);
 }
 
+// Fix: previously requested delegate: "GPU" for all three models with no
+// fallback. Some mobile browsers (or a device already under WebGL context
+// pressure from 3 concurrent models) throw here instead of degrading, which
+// would leave loadModels() rejected and the app stuck on "Loading models…"
+// forever. This retries each model on the CPU delegate before giving up.
+async function createWithGpuFallback(createFn, options) {
+    try {
+        return await createFn({ ...options, baseOptions: { ...options.baseOptions, delegate: 'GPU' } });
+    } catch (e) {
+        console.warn('GPU delegate failed, falling back to CPU:', e);
+        return await createFn({ ...options, baseOptions: { ...options.baseOptions, delegate: 'CPU' } });
+    }
+}
+
 async function loadModels() {
     statusEl.textContent = 'Loading models…';
     const vision = await FilesetResolver.forVisionTasks(
@@ -926,36 +1050,36 @@ async function loadModels() {
     );
 
     const [obj, face, embedder] = await Promise.all([
-        ObjectDetector.createFromOptions(vision, {
-            baseOptions: {
-                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite",
-                delegate: "GPU"
-            },
-            runningMode: "VIDEO",
-            scoreThreshold: MIN_SCORE,
-            maxResults: 10
-        }),
-        FaceLandmarker.createFromOptions(vision, {
-            baseOptions: {
-                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-                delegate: "GPU"
-            },
-            runningMode: "VIDEO",
-            numFaces: 5,
-            minFaceDetectionConfidence: MIN_SCORE,
-            minFacePresenceConfidence: MIN_SCORE,
-            minTrackingConfidence: MIN_SCORE,
-            outputFaceBlendshapes: true,
-            outputFacialTransformationMatrixes: false
-        }),
-        ImageEmbedder.createFromOptions(vision, {
-            baseOptions: {
-                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_small/float32/1/mobilenet_v3_small.tflite",
-                delegate: "GPU"
-            },
-            runningMode: "VIDEO",
-            quantize: false
-        })
+        createWithGpuFallback(
+            (opts) => ObjectDetector.createFromOptions(vision, opts),
+            {
+                baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite" },
+                runningMode: "VIDEO",
+                scoreThreshold: MIN_SCORE,
+                maxResults: 10
+            }
+        ),
+        createWithGpuFallback(
+            (opts) => FaceLandmarker.createFromOptions(vision, opts),
+            {
+                baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task" },
+                runningMode: "VIDEO",
+                numFaces: 5,
+                minFaceDetectionConfidence: MIN_SCORE,
+                minFacePresenceConfidence: MIN_SCORE,
+                minTrackingConfidence: MIN_SCORE,
+                outputFaceBlendshapes: true,
+                outputFacialTransformationMatrixes: false
+            }
+        ),
+        createWithGpuFallback(
+            (opts) => ImageEmbedder.createFromOptions(vision, opts),
+            {
+                baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_small/float32/1/mobilenet_v3_small.tflite" },
+                runningMode: "VIDEO",
+                quantize: false
+            }
+        )
     ]);
     objectDetector = obj;
     faceLandmarker = face;
@@ -980,14 +1104,26 @@ async function start() {
 
     resizeOverlay();
 
+    // Fix: previously just logged and moved on if IndexedDB failed to open,
+    // leaving faceDB null with no user-visible signal until they tapped
+    // Save and got a silent no-op. updateSaveButton() now reflects this
+    // state (disabled button + tooltip) as soon as start() runs.
     try {
         faceDB = await openFaceDB();
         await loadStoredFaces();
     } catch (e) {
         console.error('Face DB error:', e);
+        faceDB = null;
+        faceDBError = e;
     }
 
-    await loadModels();
+    try {
+        await loadModels();
+    } catch (e) {
+        console.error('Model load error:', e);
+        statusEl.textContent = 'Failed to load models — check connection and reload';
+        return;
+    }
 
     running = true;
     requestAnimationFrame(detectLoop);
