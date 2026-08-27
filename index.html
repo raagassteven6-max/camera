@@ -368,12 +368,11 @@ const boostCtx = boostCanvas.getContext('2d', { willReadFrequently: false });
 let frameTimes = [];
 let frameCount = 0;
 
-// ---- Single-frame VLM relay (HF Inference API) ----
-// ⚠️ SECURITY: This token is visible in client-side code. Anyone with
-// browser dev tools can read it. For production, proxy through your own
-// backend or use a Space with CORS + token validation.
-const HF_TOKEN = 'https://stef-vlm-proxy.your-subdomain.workers.dev';
-const VLM_ENDPOINT = 'https://api-inference.huggingface.co/models/Qwen/Qwen2-VL-2B-Instruct';
+// ---- Single-frame VLM relay (via Cloudflare Worker proxy) ----
+// The Worker holds the real HF token server-side. The browser never
+// sees it — only the Worker URL below, which is safe to ship in
+// client code because the Worker itself gates/authorizes requests.
+const VLM_ENDPOINT = 'https://stef-vlm-proxy.your-subdomain.workers.dev';
 const VLM_TIMEOUT_MS = 30000; // 30s for HF cold-start
 
 function tickFps() {
@@ -405,25 +404,16 @@ function captureCurrentFrame(targetBox = null) {
 }
 
 async function queryVLM(imageBase64, question) {
-    if (!VLM_ENDPOINT || !HF_TOKEN) {
-        return '[VLM endpoint or token not configured]';
+    if (!VLM_ENDPOINT) {
+        return '[VLM endpoint not configured]';
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), VLM_TIMEOUT_MS);
     try {
         const res = await fetch(VLM_ENDPOINT, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ image: imageBase64, question }),
-    signal: controller.signal
-});
-            },
-            body: JSON.stringify({
-                inputs: {
-                    image: imageBase64,
-                    text: question
-                }
-            }),
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: imageBase64, question }),
             signal: controller.signal
         });
         if (!res.ok) {
@@ -431,7 +421,8 @@ async function queryVLM(imageBase64, question) {
             throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
         }
         const data = await res.json();
-        // HF Inference API returns various shapes. Try common ones.
+        // The Worker (or the underlying HF model) may return various
+        // shapes depending on how you implemented the proxy. Try common ones.
         if (Array.isArray(data)) {
             if (data[0]?.generated_text) return data[0].generated_text;
             if (data[0]?.text) return data[0].text;
