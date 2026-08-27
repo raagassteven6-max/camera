@@ -350,7 +350,6 @@ const DB_STORE = 'faces';
 const ALIGN_SIZE = 112;
 const RECOGNITION_THRESHOLD = 0.60;
 let faceDB = null;
-let faceDBError = null;
 let storedFaces = [];
 let recognitionCache = new Map();
 let pendingSave = null;
@@ -382,31 +381,42 @@ function tickFps() {
     fpsEl.textContent = `${frameTimes.length} fps`;
 }
 
+// FIX #2: single source of truth for the padded crop rect. Both the
+// on-screen thumbnail (drawTargetPreview) and the VLM capture
+// (captureCurrentFrame) call this now, so they can never silently
+// drift out of sync if the padding is ever tuned.
+function getCropRect(box, pad = 0.15) {
+    const [x, y, w, h] = box;
+    const px = Math.max(0, x - w * pad);
+    const py = Math.max(0, y - h * pad);
+    const pw = Math.min(video.videoWidth - px, w * (1 + pad * 2));
+    const ph = Math.min(video.videoHeight - py, h * (1 + pad * 2));
+    return { px, py, pw, ph };
+}
+
+// FIX #3: the no-target (full-frame) branch is now capped to 640px on
+// its longest side too, same as the target-box branch, instead of
+// sending the raw video.videoWidth x videoHeight straight through.
 function captureCurrentFrame(targetBox = null) {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     if (targetBox) {
-        const [x, y, w, h] = targetBox;
-        const pad = 0.15;
-        const px = Math.max(0, x - w * pad);
-        const py = Math.max(0, y - h * pad);
-        const pw = Math.min(video.videoWidth - px, w * (1 + pad * 2));
-        const ph = Math.min(video.videoHeight - py, h * (1 + pad * 2));
+        const { px, py, pw, ph } = getCropRect(targetBox);
         canvas.width = Math.min(Math.round(pw), 640);
         canvas.height = Math.min(Math.round(ph), 640);
         ctx.drawImage(video, px, py, pw, ph, 0, 0, canvas.width, canvas.height);
     } else {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        ctx.drawImage(video, 0, 0);
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        const scale = Math.min(1, 640 / Math.max(vw, vh));
+        canvas.width = Math.max(1, Math.round(vw * scale));
+        canvas.height = Math.max(1, Math.round(vh * scale));
+        ctx.drawImage(video, 0, 0, vw, vh, 0, 0, canvas.width, canvas.height);
     }
     return canvas.toDataURL('image/jpeg', 0.85);
 }
 
 async function queryVLM(imageBase64, question) {
-    if (!VLM_ENDPOINT) {
-        return '[VLM endpoint not configured]';
-    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), VLM_TIMEOUT_MS);
     try {
@@ -435,6 +445,13 @@ async function queryVLM(imageBase64, question) {
         if (data.answer) return data.answer;
         if (data.response) return data.response;
         return JSON.stringify(data);
+    } catch (err) {
+        // FIX #4 (minor): surface a clear timeout message instead of the
+        // browser's generic "The user aborted a request." AbortError text.
+        if (err.name === 'AbortError') {
+            throw new Error(`VLM timed out after ${VLM_TIMEOUT_MS / 1000}s`);
+        }
+        throw err;
     } finally {
         clearTimeout(timer);
     }
@@ -678,9 +695,14 @@ function updateTracks(detections, ranFace) {
     tracks = tracks.filter((t) => t.lastSeen <= MAX_LOST_FRAMES);
 }
 
-function drawTracks() {
+// FIX #1: drawTracks now takes the current target as a parameter
+// instead of calling getCurrentTarget() itself. getCurrentTarget()
+// has a side effect (it can clear lockedId), so it should only be
+// computed once per detectLoop tick — see detectLoop below, which
+// now computes it once and passes it to both drawTracks and
+// drawTargetPreview.
+function drawTracks(currentTarget) {
     overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
-    const currentTarget = getCurrentTarget();
     tracks.forEach((t) => {
         if (t.lastSeen > 0) return;
         const [x, y, w, h] = toCanvasRect(t.box);
@@ -771,18 +793,15 @@ function buildSceneState() {
     };
 }
 
+// FIX #2 (cont'd): uses getCropRect instead of re-deriving the same
+// pad/clamp math that captureCurrentFrame also needs.
 function drawTargetPreview(target) {
     if (!target) {
         targetPreview.classList.remove('active');
         targetLabel.classList.remove('active');
         return;
     }
-    const [x, y, w, h] = target.box;
-    const pad = 0.15;
-    const px = Math.max(0, x - w * pad);
-    const py = Math.max(0, y - h * pad);
-    const pw = Math.min(video.videoWidth - px, w * (1 + pad * 2));
-    const ph = Math.min(video.videoHeight - py, h * (1 + pad * 2));
+    const { px, py, pw, ph } = getCropRect(target.box);
 
     targetPreviewCtx.clearRect(0, 0, 80, 80);
     targetPreviewCtx.drawImage(video, px, py, pw, ph, 0, 0, 80, 80);
@@ -1066,8 +1085,12 @@ async function detectLoop() {
             }
         }
 
-        drawTracks();
-        drawTargetPreview(getCurrentTarget());
+        // FIX #1 (cont'd): getCurrentTarget() is now called exactly once
+        // per tick, and the result is reused for both drawTracks and
+        // drawTargetPreview instead of each of them calling it separately.
+        const currentTarget = getCurrentTarget();
+        drawTracks(currentTarget);
+        drawTargetPreview(currentTarget);
         updateSaveButton();
         tickFps();
     } catch (err) {
@@ -1154,7 +1177,6 @@ async function start() {
     } catch (e) {
         console.error('Face DB error:', e);
         faceDB = null;
-        faceDBError = e;
     }
 
     try {
