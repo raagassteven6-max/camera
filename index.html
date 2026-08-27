@@ -220,6 +220,17 @@
         opacity: 0.5;
         cursor: not-allowed;
     }
+    /* ---- NEW: lookback selector ---- */
+    #lookback-select {
+        background: rgba(0,0,0,0.55);
+        border: 1px solid rgba(255,255,255,0.15);
+        color: #FFD600;
+        padding: 5px 8px;
+        border-radius: 14px;
+        font-size: 12px;
+        outline: none;
+        cursor: pointer;
+    }
 
     #bridge-debug {
         position: absolute;
@@ -259,6 +270,7 @@
     #bridge-close:active { background: rgba(255,255,255,0.3); }
     #bridge-text { padding-right: 28px; }
 </style>
+<base target="_blank">
 </head>
 <body>
 <div id="stage">
@@ -290,6 +302,16 @@
     </div>
     <div id="ask-bar">
         <input id="ask-input" type="text" placeholder="Ask about what's in view…">
+        <!-- NEW: lookback selector -->
+        <select id="lookback-select">
+            <option value="0">Now</option>
+            <option value="5">5s</option>
+            <option value="10">10s</option>
+            <option value="15">15s</option>
+            <option value="20">20s</option>
+            <option value="30">30s</option>
+            <option value="40">40s</option>
+        </select>
         <button id="ask-btn">Ask</button>
     </div>
     <div id="start-overlay">
@@ -329,6 +351,7 @@ const nameConfirm = document.getElementById('name-confirm');
 const nameCancel = document.getElementById('name-cancel');
 const namePreview = document.getElementById('name-preview');
 const nameError = document.getElementById('name-error');
+const lookbackSelect = document.getElementById('lookback-select');
 
 let lockedId = null;
 let boostOn = false;
@@ -368,11 +391,50 @@ let frameTimes = [];
 let frameCount = 0;
 
 // ---- Single-frame VLM relay (via Cloudflare Worker proxy) ----
-// The Worker holds the real HF token server-side. The browser never
-// sees it — only the Worker URL below, which is safe to ship in
-// client code because the Worker itself gates/authorizes requests.
 const VLM_ENDPOINT = 'https://stef-vlm-proxy.stevenedwardraagas.workers.dev';
-const VLM_TIMEOUT_MS = 30000; // 30s for HF cold-start
+const VLM_TIMEOUT_MS = 30000;
+
+// ---- 40s ring buffer (sensory memory) ----
+const RING_SIZE = 40;
+const STORE_W = 480;
+const STORE_H = 360;
+const RING_JPEG_QUAL = 0.75;
+const ring = new Array(RING_SIZE).fill(null);
+let ringIdx = 0;
+let ringFull = false;
+let ringTimer = null;
+
+const ringCanvas = document.createElement('canvas');
+ringCanvas.width = STORE_W;
+ringCanvas.height = STORE_H;
+const ringCtx = ringCanvas.getContext('2d');
+
+function captureRingFrame() {
+    if (video.readyState < 2 || video.videoWidth === 0) return;
+    ringCtx.drawImage(video, 0, 0, STORE_W, STORE_H);
+    ring[ringIdx] = { ts: Date.now(), dataUrl: ringCanvas.toDataURL('image/jpeg', RING_JPEG_QUAL) };
+    ringIdx = (ringIdx + 1) % RING_SIZE;
+    if (ringIdx === 0) ringFull = true;
+}
+
+function startRingBuffer() {
+    if (ringTimer) return;
+    ringTimer = setInterval(captureRingFrame, 1000);
+}
+
+function getClip(secondsBack, maxFrames = 8) {
+    const cutoff = Date.now() - secondsBack * 1000;
+    const count = ringFull ? RING_SIZE : ringIdx;
+    const frames = [];
+    for (let i = 0; i < count; i++) {
+        const f = ring[i];
+        if (f && f.ts >= cutoff) frames.push(f);
+    }
+    frames.sort((a, b) => a.ts - b.ts);
+    if (frames.length <= maxFrames) return frames;
+    const step = (frames.length - 1) / (maxFrames - 1);
+    return Array.from({ length: maxFrames }, (_, i) => frames[Math.round(i * step)]);
+}
 
 function tickFps() {
     const now = performance.now();
@@ -381,10 +443,6 @@ function tickFps() {
     fpsEl.textContent = `${frameTimes.length} fps`;
 }
 
-// FIX #2: single source of truth for the padded crop rect. Both the
-// on-screen thumbnail (drawTargetPreview) and the VLM capture
-// (captureCurrentFrame) call this now, so they can never silently
-// drift out of sync if the padding is ever tuned.
 function getCropRect(box, pad = 0.15) {
     const [x, y, w, h] = box;
     const px = Math.max(0, x - w * pad);
@@ -394,9 +452,6 @@ function getCropRect(box, pad = 0.15) {
     return { px, py, pw, ph };
 }
 
-// FIX #3: the no-target (full-frame) branch is now capped to 640px on
-// its longest side too, same as the target-box branch, instead of
-// sending the raw video.videoWidth x videoHeight straight through.
 function captureCurrentFrame(targetBox = null) {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
@@ -416,14 +471,29 @@ function captureCurrentFrame(targetBox = null) {
     return canvas.toDataURL('image/jpeg', 0.85);
 }
 
-async function queryVLM(imageBase64, question) {
+function parseVLMResponse(data) {
+    if (Array.isArray(data)) {
+        if (data[0]?.generated_text) return data[0].generated_text;
+        if (data[0]?.text) return data[0].text;
+        if (data[0]?.description) return data[0].description;
+        if (data[0]?.answer) return data[0].answer;
+    }
+    if (data.generated_text) return data.generated_text;
+    if (data.text) return data.text;
+    if (data.description) return data.description;
+    if (data.answer) return data.answer;
+    if (data.response) return data.response;
+    return JSON.stringify(data);
+}
+
+async function sendVLMPayload(payload) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), VLM_TIMEOUT_MS);
     try {
         const res = await fetch(VLM_ENDPOINT, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image: imageBase64, question }),
+            body: JSON.stringify(payload),
             signal: controller.signal
         });
         if (!res.ok) {
@@ -431,23 +501,8 @@ async function queryVLM(imageBase64, question) {
             throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
         }
         const data = await res.json();
-        // The Worker (or the underlying HF model) may return various
-        // shapes depending on how you implemented the proxy. Try common ones.
-        if (Array.isArray(data)) {
-            if (data[0]?.generated_text) return data[0].generated_text;
-            if (data[0]?.text) return data[0].text;
-            if (data[0]?.description) return data[0].description;
-            if (data[0]?.answer) return data[0].answer;
-        }
-        if (data.generated_text) return data.generated_text;
-        if (data.text) return data.text;
-        if (data.description) return data.description;
-        if (data.answer) return data.answer;
-        if (data.response) return data.response;
-        return JSON.stringify(data);
+        return parseVLMResponse(data);
     } catch (err) {
-        // FIX #4 (minor): surface a clear timeout message instead of the
-        // browser's generic "The user aborted a request." AbortError text.
         if (err.name === 'AbortError') {
             throw new Error(`VLM timed out after ${VLM_TIMEOUT_MS / 1000}s`);
         }
@@ -455,6 +510,14 @@ async function queryVLM(imageBase64, question) {
     } finally {
         clearTimeout(timer);
     }
+}
+
+async function queryVLM(imageBase64, question) {
+    return sendVLMPayload({ image: imageBase64, question });
+}
+
+async function queryVLMClip(frames, question) {
+    return sendVLMPayload({ images: frames.map(f => f.dataUrl), question });
 }
 
 function openFaceDB() {
@@ -695,12 +758,6 @@ function updateTracks(detections, ranFace) {
     tracks = tracks.filter((t) => t.lastSeen <= MAX_LOST_FRAMES);
 }
 
-// FIX #1: drawTracks now takes the current target as a parameter
-// instead of calling getCurrentTarget() itself. getCurrentTarget()
-// has a side effect (it can clear lockedId), so it should only be
-// computed once per detectLoop tick — see detectLoop below, which
-// now computes it once and passes it to both drawTracks and
-// drawTargetPreview.
 function drawTracks(currentTarget) {
     overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
     tracks.forEach((t) => {
@@ -788,13 +845,13 @@ function buildSceneState() {
     });
 
     return {
-        text: `Current scene:\n${lines.join('\n')}`,
+        text: `Current scene:
+${lines.join('
+')}`,
         target
     };
 }
 
-// FIX #2 (cont'd): uses getCropRect instead of re-deriving the same
-// pad/clamp math that captureCurrentFrame also needs.
 function drawTargetPreview(target) {
     if (!target) {
         targetPreview.classList.remove('active');
@@ -856,32 +913,47 @@ async function handleAsk() {
     const question = askInput.value.trim();
     if (!question) return;
 
+    const lookbackSec = parseInt(lookbackSelect.value, 10) || 0;
+
     askBtn.disabled = true;
     askBtn.textContent = '…';
-    statusEl.textContent = 'Asking VLM…';
-
-    const scene = buildSceneState();
-    const target = scene.target;
-    drawTargetPreview(target);
+    statusEl.textContent = lookbackSec > 0 ? `Asking VLM (${lookbackSec}s clip)…` : 'Asking VLM…';
 
     let vlmDesc = '[VLM not called]';
+    let targetDesc = 'none — whole frame';
+    let sceneText = '';
+
     try {
-        const imageBase64 = captureCurrentFrame(target?.box ?? null);
-        vlmDesc = await queryVLM(imageBase64, question);
+        if (lookbackSec === 0) {
+            const scene = buildSceneState();
+            const target = scene.target;
+            drawTargetPreview(target);
+            const imageBase64 = captureCurrentFrame(target?.box ?? null);
+            vlmDesc = await queryVLM(imageBase64, question);
+            targetDesc = target
+                ? `${target.class} #${target.id} (${quantizeZone(target.box)}, ${sizeDescriptor(target.box)})`
+                : 'none — whole frame';
+            sceneText = scene.text;
+        } else {
+            const frames = getClip(lookbackSec);
+            if (frames.length === 0) {
+                vlmDesc = '[No buffered frames for that window yet]';
+            } else {
+                vlmDesc = await queryVLMClip(frames, question);
+            }
+            targetDesc = `clip: last ${lookbackSec}s (${frames.length} frames)`;
+            sceneText = buildSceneState().text;
+        }
     } catch (err) {
         console.error('VLM error:', err);
         vlmDesc = `[VLM error: ${err.message}]`;
     }
 
-    const targetDesc = target
-        ? `${target.class} #${target.id} (${quantizeZone(target.box)}, ${sizeDescriptor(target.box)})`
-        : 'none — whole frame';
-
     const payload =
-`[VLM call — crop: ${targetDesc}]
+`[VLM call — ${targetDesc}]
 [VLM description: ${vlmDesc}]
 
-${scene.text}
+${sceneText}
 
 User question: "${question}"
 
@@ -1085,9 +1157,6 @@ async function detectLoop() {
             }
         }
 
-        // FIX #1 (cont'd): getCurrentTarget() is now called exactly once
-        // per tick, and the result is reused for both drawTracks and
-        // drawTargetPreview instead of each of them calling it separately.
         const currentTarget = getCurrentTarget();
         drawTracks(currentTarget);
         drawTargetPreview(currentTarget);
@@ -1170,6 +1239,7 @@ async function start() {
     });
 
     resizeOverlay();
+    startRingBuffer();
 
     try {
         faceDB = await openFaceDB();
