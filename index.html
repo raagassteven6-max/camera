@@ -220,7 +220,6 @@
         opacity: 0.5;
         cursor: not-allowed;
     }
-    /* ---- NEW: lookback selector ---- */
     #lookback-select {
         background: rgba(0,0,0,0.55);
         border: 1px solid rgba(255,255,255,0.15);
@@ -270,7 +269,6 @@
     #bridge-close:active { background: rgba(255,255,255,0.3); }
     #bridge-text { padding-right: 28px; }
 </style>
-<base target="_blank">
 </head>
 <body>
 <div id="stage">
@@ -302,7 +300,6 @@
     </div>
     <div id="ask-bar">
         <input id="ask-input" type="text" placeholder="Ask about what's in view…">
-        <!-- NEW: lookback selector -->
         <select id="lookback-select">
             <option value="0">Now</option>
             <option value="5">5s</option>
@@ -390,11 +387,9 @@ const boostCtx = boostCanvas.getContext('2d', { willReadFrequently: false });
 let frameTimes = [];
 let frameCount = 0;
 
-// ---- Single-frame VLM relay (via Cloudflare Worker proxy) ----
 const VLM_ENDPOINT = 'https://stef-vlm-proxy.stevenedwardraagas.workers.dev';
 const VLM_TIMEOUT_MS = 30000;
 
-// ---- 40s ring buffer (sensory memory) ----
 const RING_SIZE = 40;
 const STORE_W = 480;
 const STORE_H = 360;
@@ -845,9 +840,7 @@ function buildSceneState() {
     });
 
     return {
-        text: `Current scene:
-${lines.join('
-')}`,
+        text: `Current scene:\n${lines.join('\n')}`,
         target
     };
 }
