@@ -216,7 +216,6 @@
         font-weight: 600;
         font-size: 14px;
     }
-    /* ---- NEW: disabled state for Ask button during VLM flight ---- */
     #ask-btn:disabled {
         opacity: 0.5;
         cursor: not-allowed;
@@ -260,7 +259,6 @@
     #bridge-close:active { background: rgba(255,255,255,0.3); }
     #bridge-text { padding-right: 28px; }
 </style>
-<base target="_blank">
 </head>
 <body>
 <div id="stage">
@@ -354,13 +352,9 @@ const RECOGNITION_THRESHOLD = 0.60;
 let faceDB = null;
 let faceDBError = null;
 let storedFaces = [];
-let recognitionCache = new Map(); // trackId -> { recognition, frameCount }
+let recognitionCache = new Map();
 let pendingSave = null;
 
-// Fix: ImageEmbedder in VIDEO mode requires strictly increasing timestamps.
-// performance.now() can repeat within the same tick (or across the two
-// recognition calls we may issue per frame), which throws. This guarantees
-// monotonic input regardless of how often/fast we call it.
 let embedClock = 0;
 function nextEmbedTimestamp() {
     const now = Math.floor(performance.now());
@@ -374,13 +368,13 @@ const boostCtx = boostCanvas.getContext('2d', { willReadFrequently: false });
 let frameTimes = [];
 let frameCount = 0;
 
-// ---- Single-frame VLM relay ----
-// Set this to your VLM endpoint (e.g. Hugging Face Space or own server).
-// The endpoint must accept POST { image: "data:image/jpeg;base64,...", question: "..." }
-// and return JSON with at least one of: description | text | answer | response.
-// CORS must allow POST from this origin.
-const VLM_ENDPOINT = '';
-const VLM_TIMEOUT_MS = 15000;
+// ---- Single-frame VLM relay (HF Inference API) ----
+// ⚠️ SECURITY: This token is visible in client-side code. Anyone with
+// browser dev tools can read it. For production, proxy through your own
+// backend or use a Space with CORS + token validation.
+const HF_TOKEN = 'https://stef-vlm-proxy.your-subdomain.workers.dev';
+const VLM_ENDPOINT = 'https://api-inference.huggingface.co/models/Qwen/Qwen2-VL-2B-Instruct';
+const VLM_TIMEOUT_MS = 30000; // 30s for HF cold-start
 
 function tickFps() {
     const now = performance.now();
@@ -389,10 +383,6 @@ function tickFps() {
     fpsEl.textContent = `${frameTimes.length} fps`;
 }
 
-// Capture the current video frame as a base64 JPEG.
-// If targetBox is provided, crops to that box with 15% padding (mirroring
-// drawTargetPreview logic) and clamps the long edge to 640 px to keep
-// payload size reasonable. If null, captures the full frame.
 function captureCurrentFrame(targetBox = null) {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
@@ -414,24 +404,46 @@ function captureCurrentFrame(targetBox = null) {
     return canvas.toDataURL('image/jpeg', 0.85);
 }
 
-// Call the VLM endpoint. If VLM_ENDPOINT is empty, returns a placeholder
-// string so the UI doesn't crash and the user knows what to configure.
 async function queryVLM(imageBase64, question) {
-    if (!VLM_ENDPOINT) {
-        return '[VLM endpoint not configured — set VLM_ENDPOINT in code]';
+    if (!VLM_ENDPOINT || !HF_TOKEN) {
+        return '[VLM endpoint or token not configured]';
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), VLM_TIMEOUT_MS);
     try {
         const res = await fetch(VLM_ENDPOINT, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image: imageBase64, question }),
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image: imageBase64, question }),
+    signal: controller.signal
+});
+            },
+            body: JSON.stringify({
+                inputs: {
+                    image: imageBase64,
+                    text: question
+                }
+            }),
             signal: controller.signal
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+            const errText = await res.text().catch(() => '');
+            throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
+        }
         const data = await res.json();
-        return data.description || data.text || data.answer || data.response || JSON.stringify(data);
+        // HF Inference API returns various shapes. Try common ones.
+        if (Array.isArray(data)) {
+            if (data[0]?.generated_text) return data[0].generated_text;
+            if (data[0]?.text) return data[0].text;
+            if (data[0]?.description) return data[0].description;
+            if (data[0]?.answer) return data[0].answer;
+        }
+        if (data.generated_text) return data.generated_text;
+        if (data.text) return data.text;
+        if (data.description) return data.description;
+        if (data.answer) return data.answer;
+        if (data.response) return data.response;
+        return JSON.stringify(data);
     } finally {
         clearTimeout(timer);
     }
@@ -474,10 +486,6 @@ async function loadStoredFaces() {
     }
 }
 
-// Fix: this used to fail silently (return with no signal) when faceDB was
-// null or the transaction failed. The caller had no way to know the save
-// didn't happen, so it told the user "Saved" regardless. Now it reports
-// success/failure so the UI can be honest about it.
 async function saveFaceRecord(name, embedding, thumbnail) {
     if (!faceDB) return false;
     const record = {
@@ -496,9 +504,6 @@ async function saveFaceRecord(name, embedding, thumbnail) {
             tx.onerror = () => reject(tx.error);
         });
         await loadStoredFaces();
-        // A newly saved face could match tracks other than the one just
-        // saved (e.g. the same person seen in two boxes), so drop the
-        // cache instead of leaving stale "no match" results in place.
         recognitionCache.clear();
         return true;
     } catch (e) {
@@ -518,7 +523,7 @@ function alignFaceFromLandmarks(source, landmarks) {
     const dy = ry - ly;
     const angle = Math.atan2(dy, dx);
     const dist = Math.hypot(dx, dy);
-    if (!Number.isFinite(dist) || dist < 1e-3) return null; // Fix: degenerate landmarks would divide by ~0
+    if (!Number.isFinite(dist) || dist < 1e-3) return null;
     const desiredDist = ALIGN_SIZE * 0.35;
     const scale = desiredDist / dist;
     const centerX = (lx + rx) / 2;
@@ -684,11 +689,6 @@ function updateTracks(detections, ranFace) {
 
 function drawTracks() {
     overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
-    // Fix: was calling getCurrentTarget() once per track inside the loop
-    // below (an O(n^2) rescan every frame), and that function has the side
-    // effect of clearing lockedId when the locked track is missing — so it
-    // could silently unlock mid-frame depending on iteration order.
-    // Compute the target once, up front, instead.
     const currentTarget = getCurrentTarget();
     tracks.forEach((t) => {
         if (t.lastSeen > 0) return;
@@ -802,10 +802,6 @@ function drawTargetPreview(target) {
     targetLabel.classList.add('active');
 }
 
-// Fix: previously only checked track.class === 'face'; now also reflects
-// whether persistent storage is actually available, and disables (rather
-// than hides) the button so the user gets an explicit reason instead of
-// the feature just quietly not working.
 function updateSaveButton() {
     const locked = tracks.find((t) => t.id === lockedId && t.lastSeen === 0);
     if (locked && locked.class === 'face') {
@@ -822,15 +818,6 @@ overlay.addEventListener('click', (e) => {
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    // Fix: a face box almost always sits inside a person box, so a tap on
-    // a face also lands inside the person's bounding box. tracks.find()
-    // returned whichever track happened to come first in array order —
-    // in practice that was usually the person, since it's added by the
-    // object-detector pass. That silently locked the person instead of
-    // the face, which is why the box turned yellow but Save Face never
-    // appeared (it only shows for a locked track with class 'face').
-    // Collect every box under the tap, then prefer a face over anything
-    // else, and prefer the smallest (most specific) box as a tiebreak.
     const hits = tracks.filter((t) => {
         if (t.lastSeen > 0) return false;
         const [bx, by, bw, bh] = toCanvasRect(t.box);
@@ -855,7 +842,6 @@ overlay.addEventListener('click', (e) => {
     lockedId = (lockedId === hit.id) ? null : hit.id;
 });
 
-// ---- CHANGED: wired single-frame VLM relay ----
 async function handleAsk() {
     const question = askInput.value.trim();
     if (!question) return;
@@ -868,8 +854,6 @@ async function handleAsk() {
     const target = scene.target;
     drawTargetPreview(target);
 
-    // Capture frame and query VLM. If anything fails, we still show the
-    // bridge panel with the error noted so the user isn't left hanging.
     let vlmDesc = '[VLM not called]';
     try {
         const imageBase64 = captureCurrentFrame(target?.box ?? null);
@@ -916,10 +900,6 @@ boostBtn.addEventListener('click', () => {
     boostBtn.textContent = boostOn ? 'Boost ON' : 'Moon';
 });
 
-// Fix: guarded against a locked face whose landmarks disappeared between
-// the click and the button press (track could have been dropped/reused),
-// and against alignFaceFromLandmarks returning null (degenerate eye
-// distance) instead of assuming it always succeeds.
 async function handleSaveFace() {
     const locked = tracks.find((t) => t.id === lockedId && t.lastSeen === 0);
     if (!locked || locked.class !== 'face' || !locked.landmarks) {
@@ -951,11 +931,6 @@ async function handleSaveFace() {
     nameInput.focus();
 }
 
-// Fix: this is the core bug — it used to report "Saved" unconditionally.
-// Now it actually waits on saveFaceRecord's result and only confirms
-// success, closes the modal, or attaches recognition, if the write
-// genuinely landed in IndexedDB. On failure the modal stays open so the
-// user can retry instead of believing a name that was never stored.
 async function handleNameConfirm() {
     const name = nameInput.value.trim();
     if (!name || !pendingSave) return;
@@ -976,7 +951,7 @@ async function handleNameConfirm() {
     if (!ok) {
         nameError.textContent = 'Save failed — try again.';
         statusEl.textContent = 'Save failed — face not stored';
-        return; // keep modal open, pendingSave intact, so the user can retry
+        return;
     }
 
     pendingSave.track.recognition = { name, similarity: 1.0 };
@@ -1112,11 +1087,6 @@ async function detectLoop() {
     requestAnimationFrame(detectLoop);
 }
 
-// Fix: previously requested delegate: "GPU" for all three models with no
-// fallback. Some mobile browsers (or a device already under WebGL context
-// pressure from 3 concurrent models) throw here instead of degrading, which
-// would leave loadModels() rejected and the app stuck on "Loading models…"
-// forever. This retries each model on the CPU delegate before giving up.
 async function createWithGpuFallback(createFn, options) {
     try {
         return await createFn({ ...options, baseOptions: { ...options.baseOptions, delegate: 'GPU' } });
@@ -1187,10 +1157,6 @@ async function start() {
 
     resizeOverlay();
 
-    // Fix: previously just logged and moved on if IndexedDB failed to open,
-    // leaving faceDB null with no user-visible signal until they tapped
-    // Save and got a silent no-op. updateSaveButton() now reflects this
-    // state (disabled button + tooltip) as soon as start() runs.
     try {
         faceDB = await openFaceDB();
         await loadStoredFaces();
