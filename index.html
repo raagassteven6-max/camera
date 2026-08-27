@@ -216,6 +216,11 @@
         font-weight: 600;
         font-size: 14px;
     }
+    /* ---- NEW: disabled state for Ask button during VLM flight ---- */
+    #ask-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
 
     #bridge-debug {
         position: absolute;
@@ -255,6 +260,7 @@
     #bridge-close:active { background: rgba(255,255,255,0.3); }
     #bridge-text { padding-right: 28px; }
 </style>
+<base target="_blank">
 </head>
 <body>
 <div id="stage">
@@ -368,11 +374,67 @@ const boostCtx = boostCanvas.getContext('2d', { willReadFrequently: false });
 let frameTimes = [];
 let frameCount = 0;
 
+// ---- Single-frame VLM relay ----
+// Set this to your VLM endpoint (e.g. Hugging Face Space or own server).
+// The endpoint must accept POST { image: "data:image/jpeg;base64,...", question: "..." }
+// and return JSON with at least one of: description | text | answer | response.
+// CORS must allow POST from this origin.
+const VLM_ENDPOINT = '';
+const VLM_TIMEOUT_MS = 15000;
+
 function tickFps() {
     const now = performance.now();
     frameTimes.push(now);
     frameTimes = frameTimes.filter((t) => now - t < 1000);
     fpsEl.textContent = `${frameTimes.length} fps`;
+}
+
+// Capture the current video frame as a base64 JPEG.
+// If targetBox is provided, crops to that box with 15% padding (mirroring
+// drawTargetPreview logic) and clamps the long edge to 640 px to keep
+// payload size reasonable. If null, captures the full frame.
+function captureCurrentFrame(targetBox = null) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (targetBox) {
+        const [x, y, w, h] = targetBox;
+        const pad = 0.15;
+        const px = Math.max(0, x - w * pad);
+        const py = Math.max(0, y - h * pad);
+        const pw = Math.min(video.videoWidth - px, w * (1 + pad * 2));
+        const ph = Math.min(video.videoHeight - py, h * (1 + pad * 2));
+        canvas.width = Math.min(Math.round(pw), 640);
+        canvas.height = Math.min(Math.round(ph), 640);
+        ctx.drawImage(video, px, py, pw, ph, 0, 0, canvas.width, canvas.height);
+    } else {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0);
+    }
+    return canvas.toDataURL('image/jpeg', 0.85);
+}
+
+// Call the VLM endpoint. If VLM_ENDPOINT is empty, returns a placeholder
+// string so the UI doesn't crash and the user knows what to configure.
+async function queryVLM(imageBase64, question) {
+    if (!VLM_ENDPOINT) {
+        return '[VLM endpoint not configured — set VLM_ENDPOINT in code]';
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), VLM_TIMEOUT_MS);
+    try {
+        const res = await fetch(VLM_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: imageBase64, question }),
+            signal: controller.signal
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        return data.description || data.text || data.answer || data.response || JSON.stringify(data);
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 function openFaceDB() {
@@ -793,20 +855,37 @@ overlay.addEventListener('click', (e) => {
     lockedId = (lockedId === hit.id) ? null : hit.id;
 });
 
-function handleAsk() {
+// ---- CHANGED: wired single-frame VLM relay ----
+async function handleAsk() {
     const question = askInput.value.trim();
     if (!question) return;
 
-    const scene = buildSceneState();
-    drawTargetPreview(scene.target);
+    askBtn.disabled = true;
+    askBtn.textContent = '…';
+    statusEl.textContent = 'Asking VLM…';
 
-    const targetDesc = scene.target
-        ? `${scene.target.class} #${scene.target.id} (${quantizeZone(scene.target.box)}, ${sizeDescriptor(scene.target.box)})`
+    const scene = buildSceneState();
+    const target = scene.target;
+    drawTargetPreview(target);
+
+    // Capture frame and query VLM. If anything fails, we still show the
+    // bridge panel with the error noted so the user isn't left hanging.
+    let vlmDesc = '[VLM not called]';
+    try {
+        const imageBase64 = captureCurrentFrame(target?.box ?? null);
+        vlmDesc = await queryVLM(imageBase64, question);
+    } catch (err) {
+        console.error('VLM error:', err);
+        vlmDesc = `[VLM error: ${err.message}]`;
+    }
+
+    const targetDesc = target
+        ? `${target.class} #${target.id} (${quantizeZone(target.box)}, ${sizeDescriptor(target.box)})`
         : 'none — whole frame';
 
     const payload =
-`[VLM call — would crop to: ${targetDesc}]
-[VLM description: <not wired yet>]
+`[VLM call — crop: ${targetDesc}]
+[VLM description: ${vlmDesc}]
 
 ${scene.text}
 
@@ -816,8 +895,12 @@ User question: "${question}"
 
     bridgeText.textContent = payload;
     bridgeDebug.classList.add('active');
+
+    askBtn.disabled = false;
+    askBtn.textContent = 'Ask';
     askInput.value = '';
     askInput.blur();
+    statusEl.textContent = 'Live';
 }
 askBtn.addEventListener('click', handleAsk);
 askInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAsk(); });
