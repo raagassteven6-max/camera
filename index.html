@@ -1,0 +1,1266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Live Tracker HUD</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+        width: 100%; height: 100vh; height: 100dvh;
+        background: #000;
+        overflow: hidden;
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    #stage {
+        position: relative;
+        width: 100vw; height: 100vh; height: 100dvh;
+    }
+    #video {
+        position: absolute; top: 0; left: 0;
+        width: 100%; height: 100%;
+        object-fit: cover;
+    }
+    #overlay {
+        position: absolute; top: 0; left: 0;
+        width: 100%; height: 100%;
+        z-index: 10;
+    }
+    #hud-top {
+        position: absolute;
+        top: 12px; left: 12px; right: 12px;
+        display: flex; justify-content: space-between; align-items: center;
+        z-index: 20;
+        pointer-events: none;
+    }
+    #hud-top > * { pointer-events: auto; }
+    #status {
+        background: rgba(0,0,0,0.55);
+        padding: 6px 12px;
+        border-radius: 14px;
+        font-size: 12px;
+        color: #0f0;
+    }
+    #fps {
+        background: rgba(0,0,0,0.55);
+        padding: 6px 12px;
+        border-radius: 14px;
+        font-size: 12px;
+        color: #0ff;
+    }
+    #boost-btn {
+        background: rgba(0,0,0,0.55);
+        border: 1px solid rgba(255,255,255,0.15);
+        color: rgba(255,255,255,0.8);
+        padding: 5px 10px;
+        border-radius: 14px;
+        font-size: 12px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    #boost-btn.active {
+        background: rgba(255, 214, 0, 0.25);
+        border-color: #FFD600;
+        color: #FFD600;
+    }
+    #start-overlay {
+        position: absolute; inset: 0;
+        display: flex; align-items: center; justify-content: center;
+        background: #111;
+        z-index: 30;
+    }
+    #start-btn {
+        padding: 16px 32px;
+        border-radius: 30px;
+        border: none;
+        background: #00e5ff;
+        color: #000;
+        font-size: 16px;
+        font-weight: 600;
+    }
+    #start-overlay.hidden { display: none; }
+
+    #target-preview {
+        position: absolute;
+        top: 52px; left: 12px;
+        width: 80px; height: 80px;
+        border: 2px solid #FFD600;
+        border-radius: 8px;
+        z-index: 20;
+        display: none;
+        background: #000;
+    }
+    #target-preview.active { display: block; }
+    #target-label {
+        position: absolute;
+        top: 136px; left: 12px;
+        max-width: 200px;
+        background: rgba(0,0,0,0.6);
+        color: #FFD600;
+        font-size: 11px;
+        padding: 4px 8px;
+        border-radius: 8px;
+        z-index: 20;
+        display: none;
+    }
+    #target-label.active { display: block; }
+
+    #save-face-btn {
+        position: absolute;
+        top: 160px; left: 12px;
+        z-index: 20;
+        padding: 5px 12px;
+        border-radius: 10px;
+        border: none;
+        background: #FFD600;
+        color: #000;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        display: none;
+    }
+    #save-face-btn.active { display: block; }
+    #save-face-btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+    }
+
+    #name-modal {
+        position: absolute; inset: 0;
+        background: rgba(0,0,0,0.8);
+        z-index: 40;
+        display: none;
+        align-items: center;
+        justify-content: center;
+    }
+    #name-modal.active { display: flex; }
+    #name-modal-content {
+        background: #222;
+        padding: 20px;
+        border-radius: 16px;
+        max-width: 280px;
+        width: 85%;
+        text-align: center;
+    }
+    #name-modal-content h3 {
+        color: #FFD600;
+        margin-bottom: 12px;
+        font-size: 16px;
+    }
+    #name-preview {
+        width: 112px;
+        height: 112px;
+        border-radius: 8px;
+        margin: 0 auto 12px;
+        background: #000;
+        display: block;
+    }
+    #name-input {
+        width: 100%;
+        padding: 10px;
+        border-radius: 10px;
+        border: none;
+        background: #333;
+        color: #fff;
+        font-size: 14px;
+        margin-bottom: 12px;
+    }
+    #name-error {
+        color: #FF6B6B;
+        font-size: 12px;
+        margin: -6px 0 10px;
+        min-height: 14px;
+        display: block;
+    }
+    #name-modal-actions {
+        display: flex;
+        gap: 8px;
+    }
+    #name-modal-actions button {
+        flex: 1;
+        padding: 10px;
+        border-radius: 10px;
+        border: none;
+        font-size: 14px;
+        cursor: pointer;
+    }
+    #name-modal-actions button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+    #name-cancel { background: #444; color: #fff; }
+    #name-confirm { background: #FFD600; color: #000; font-weight: 600; }
+
+    #ask-bar {
+        position: absolute;
+        bottom: calc(12px + env(safe-area-inset-bottom));
+        left: calc(12px + env(safe-area-inset-left));
+        right: calc(12px + env(safe-area-inset-right));
+        display: flex; gap: 8px;
+        z-index: 20;
+        transition: transform 0.25s ease;
+    }
+    #ask-input {
+        flex: 1;
+        padding: 10px 14px;
+        border-radius: 20px;
+        border: none;
+        background: rgba(255,255,255,0.9);
+        font-size: 14px;
+    }
+    #ask-btn {
+        padding: 10px 18px;
+        border-radius: 20px;
+        border: none;
+        background: #FFD600;
+        font-weight: 600;
+        font-size: 14px;
+    }
+    #ask-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+    #lookback-select {
+        background: rgba(0,0,0,0.55);
+        border: 1px solid rgba(255,255,255,0.15);
+        color: #FFD600;
+        padding: 5px 8px;
+        border-radius: 14px;
+        font-size: 12px;
+        outline: none;
+        cursor: pointer;
+    }
+
+    #bridge-debug {
+        position: absolute;
+        bottom: 64px; left: 12px; right: 12px;
+        max-height: 32vh;
+        overflow-y: auto;
+        background: rgba(0,0,0,0.75);
+        color: #9CFF9C;
+        font-family: 'SF Mono', Menlo, monospace;
+        font-size: 11px;
+        line-height: 1.5;
+        padding: 8px 10px;
+        border-radius: 10px;
+        z-index: 20;
+        display: none;
+        white-space: pre-wrap;
+        transition: transform 0.25s ease;
+    }
+    #bridge-debug.active { display: block; }
+    #bridge-close {
+        position: absolute;
+        top: 6px;
+        right: 6px;
+        width: 22px;
+        height: 22px;
+        border: none;
+        border-radius: 6px;
+        background: rgba(255,255,255,0.15);
+        color: #fff;
+        font-size: 12px;
+        line-height: 22px;
+        text-align: center;
+        cursor: pointer;
+        z-index: 21;
+        padding: 0;
+    }
+    #bridge-close:active { background: rgba(255,255,255,0.3); }
+    #bridge-text { padding-right: 28px; }
+</style>
+</head>
+<body>
+<div id="stage">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+    <div id="hud-top">
+        <div id="status">Loading…</div>
+        <button id="boost-btn">Moon</button>
+        <div id="fps">0 fps</div>
+    </div>
+    <canvas id="target-preview" width="80" height="80"></canvas>
+    <div id="target-label"></div>
+    <button id="save-face-btn">Save Face</button>
+    <div id="name-modal">
+        <div id="name-modal-content">
+            <h3>Name this face</h3>
+            <canvas id="name-preview" width="112" height="112"></canvas>
+            <input id="name-input" type="text" placeholder="Enter name..." maxlength="30">
+            <span id="name-error"></span>
+            <div id="name-modal-actions">
+                <button id="name-cancel">Cancel</button>
+                <button id="name-confirm">Save</button>
+            </div>
+        </div>
+    </div>
+    <div id="bridge-debug">
+        <button id="bridge-close" aria-label="Close debug panel">X</button>
+        <div id="bridge-text"></div>
+    </div>
+    <div id="ask-bar">
+        <input id="ask-input" type="text" placeholder="Ask about what's in view…">
+        <select id="lookback-select">
+            <option value="0">Now</option>
+            <option value="5">5s</option>
+            <option value="10">10s</option>
+            <option value="15">15s</option>
+            <option value="20">20s</option>
+            <option value="30">30s</option>
+            <option value="40">40s</option>
+        </select>
+        <button id="ask-btn">Ask</button>
+    </div>
+    <div id="start-overlay">
+        <button id="start-btn">Start Live Tracker</button>
+    </div>
+</div>
+
+<script type="module">
+import {
+    FilesetResolver,
+    ObjectDetector,
+    FaceLandmarker,
+    ImageEmbedder
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
+
+const video = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const overlayCtx = overlay.getContext('2d');
+const statusEl = document.getElementById('status');
+const fpsEl = document.getElementById('fps');
+const startOverlay = document.getElementById('start-overlay');
+const startBtn = document.getElementById('start-btn');
+const targetPreview = document.getElementById('target-preview');
+const targetPreviewCtx = targetPreview.getContext('2d');
+const targetLabel = document.getElementById('target-label');
+const bridgeDebug = document.getElementById('bridge-debug');
+const bridgeText = document.getElementById('bridge-text');
+const bridgeClose = document.getElementById('bridge-close');
+const askInput = document.getElementById('ask-input');
+const askBtn = document.getElementById('ask-btn');
+const askBar = document.getElementById('ask-bar');
+const boostBtn = document.getElementById('boost-btn');
+const saveFaceBtn = document.getElementById('save-face-btn');
+const nameModal = document.getElementById('name-modal');
+const nameInput = document.getElementById('name-input');
+const nameConfirm = document.getElementById('name-confirm');
+const nameCancel = document.getElementById('name-cancel');
+const namePreview = document.getElementById('name-preview');
+const nameError = document.getElementById('name-error');
+const lookbackSelect = document.getElementById('lookback-select');
+
+let lockedId = null;
+let boostOn = false;
+
+let objectDetector = null;
+let faceLandmarker = null;
+let imageEmbedder = null;
+let running = false;
+let tracks = [];
+let nextTrackId = 1;
+
+const IOU_MATCH_THRESHOLD = 0.15;
+const MAX_LOST_FRAMES = 6;
+const MIN_SCORE = 0.6;
+
+const DB_NAME = 'FaceVault';
+const DB_VERSION = 1;
+const DB_STORE = 'faces';
+const ALIGN_SIZE = 112;
+const RECOGNITION_THRESHOLD = 0.60;
+let faceDB = null;
+let storedFaces = [];
+let recognitionCache = new Map();
+let pendingSave = null;
+
+let embedClock = 0;
+function nextEmbedTimestamp() {
+    const now = Math.floor(performance.now());
+    embedClock = now > embedClock ? now : embedClock + 1;
+    return embedClock;
+}
+
+const boostCanvas = document.createElement('canvas');
+const boostCtx = boostCanvas.getContext('2d', { willReadFrequently: false });
+
+let frameTimes = [];
+let frameCount = 0;
+
+const VLM_ENDPOINT = 'https://stef-vlm-proxy.stevenedwardraagas.workers.dev';
+const VLM_TIMEOUT_MS = 30000;
+
+const RING_SIZE = 40;
+const STORE_W = 480;
+const STORE_H = 360;
+const RING_JPEG_QUAL = 0.75;
+const ring = new Array(RING_SIZE).fill(null);
+let ringIdx = 0;
+let ringFull = false;
+let ringTimer = null;
+
+const ringCanvas = document.createElement('canvas');
+ringCanvas.width = STORE_W;
+ringCanvas.height = STORE_H;
+const ringCtx = ringCanvas.getContext('2d');
+
+function captureRingFrame() {
+    if (video.readyState < 2 || video.videoWidth === 0) return;
+    ringCtx.drawImage(video, 0, 0, STORE_W, STORE_H);
+    ring[ringIdx] = { ts: Date.now(), dataUrl: ringCanvas.toDataURL('image/jpeg', RING_JPEG_QUAL) };
+    ringIdx = (ringIdx + 1) % RING_SIZE;
+    if (ringIdx === 0) ringFull = true;
+}
+
+function startRingBuffer() {
+    if (ringTimer) return;
+    ringTimer = setInterval(captureRingFrame, 1000);
+}
+
+function getClip(secondsBack, maxFrames = 8) {
+    const cutoff = Date.now() - secondsBack * 1000;
+    const count = ringFull ? RING_SIZE : ringIdx;
+    const frames = [];
+    for (let i = 0; i < count; i++) {
+        const f = ring[i];
+        if (f && f.ts >= cutoff) frames.push(f);
+    }
+    frames.sort((a, b) => a.ts - b.ts);
+    if (frames.length <= maxFrames) return frames;
+    const step = (frames.length - 1) / (maxFrames - 1);
+    return Array.from({ length: maxFrames }, (_, i) => frames[Math.round(i * step)]);
+}
+
+function tickFps() {
+    const now = performance.now();
+    frameTimes.push(now);
+    frameTimes = frameTimes.filter((t) => now - t < 1000);
+    fpsEl.textContent = `${frameTimes.length} fps`;
+}
+
+function getCropRect(box, pad = 0.15) {
+    const [x, y, w, h] = box;
+    const px = Math.max(0, x - w * pad);
+    const py = Math.max(0, y - h * pad);
+    const pw = Math.min(video.videoWidth - px, w * (1 + pad * 2));
+    const ph = Math.min(video.videoHeight - py, h * (1 + pad * 2));
+    return { px, py, pw, ph };
+}
+
+function captureCurrentFrame(targetBox = null) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (targetBox) {
+        const { px, py, pw, ph } = getCropRect(targetBox);
+        canvas.width = Math.min(Math.round(pw), 640);
+        canvas.height = Math.min(Math.round(ph), 640);
+        ctx.drawImage(video, px, py, pw, ph, 0, 0, canvas.width, canvas.height);
+    } else {
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        const scale = Math.min(1, 640 / Math.max(vw, vh));
+        canvas.width = Math.max(1, Math.round(vw * scale));
+        canvas.height = Math.max(1, Math.round(vh * scale));
+        ctx.drawImage(video, 0, 0, vw, vh, 0, 0, canvas.width, canvas.height);
+    }
+    return canvas.toDataURL('image/jpeg', 0.85);
+}
+
+function parseVLMResponse(data) {
+    if (Array.isArray(data)) {
+        if (data[0]?.generated_text) return data[0].generated_text;
+        if (data[0]?.text) return data[0].text;
+        if (data[0]?.description) return data[0].description;
+        if (data[0]?.answer) return data[0].answer;
+    }
+    if (data.generated_text) return data.generated_text;
+    if (data.text) return data.text;
+    if (data.description) return data.description;
+    if (data.answer) return data.answer;
+    if (data.response) return data.response;
+    return JSON.stringify(data);
+}
+
+async function sendVLMPayload(payload) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), VLM_TIMEOUT_MS);
+    try {
+        const res = await fetch(VLM_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: controller.signal
+        });
+        if (!res.ok) {
+            const errText = await res.text().catch(() => '');
+            throw new Error(`HTTP ${res.status}: ${errText.slice(0, 200)}`);
+        }
+        const data = await res.json();
+        return parseVLMResponse(data);
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            throw new Error(`VLM timed out after ${VLM_TIMEOUT_MS / 1000}s`);
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function queryVLM(imageBase64, question) {
+    return sendVLMPayload({ image: imageBase64, question });
+}
+
+async function queryVLMClip(frames, question) {
+    return sendVLMPayload({ images: frames.map(f => f.dataUrl), question });
+}
+
+function openFaceDB() {
+    return new Promise((resolve, reject) => {
+        let req;
+        try {
+            req = indexedDB.open(DB_NAME, DB_VERSION);
+        } catch (e) {
+            reject(e);
+            return;
+        }
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => resolve(req.result);
+        req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(DB_STORE)) {
+                const store = db.createObjectStore(DB_STORE, { keyPath: 'id', autoIncrement: true });
+                store.createIndex('name', 'name', { unique: false });
+            }
+        };
+    });
+}
+
+async function loadStoredFaces() {
+    if (!faceDB) return;
+    try {
+        const tx = faceDB.transaction(DB_STORE, 'readonly');
+        const store = tx.objectStore(DB_STORE);
+        const req = store.getAll();
+        storedFaces = await new Promise((resolve, reject) => {
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error);
+        });
+    } catch (e) {
+        console.error('Load stored faces error:', e);
+        storedFaces = [];
+    }
+}
+
+async function saveFaceRecord(name, embedding, thumbnail) {
+    if (!faceDB) return false;
+    const record = {
+        name,
+        embedding: Array.from(embedding),
+        thumbnail,
+        createdAt: Date.now()
+    };
+    try {
+        const tx = faceDB.transaction(DB_STORE, 'readwrite');
+        const store = tx.objectStore(DB_STORE);
+        await new Promise((resolve, reject) => {
+            const req = store.add(record);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+            tx.onerror = () => reject(tx.error);
+        });
+        await loadStoredFaces();
+        recognitionCache.clear();
+        return true;
+    } catch (e) {
+        console.error('Save face record error:', e);
+        return false;
+    }
+}
+
+function alignFaceFromLandmarks(source, landmarks) {
+    const leftEye = landmarks[33];
+    const rightEye = landmarks[263];
+    const lx = leftEye.x * source.videoWidth;
+    const ly = leftEye.y * source.videoHeight;
+    const rx = rightEye.x * source.videoWidth;
+    const ry = rightEye.y * source.videoHeight;
+    const dx = rx - lx;
+    const dy = ry - ly;
+    const angle = Math.atan2(dy, dx);
+    const dist = Math.hypot(dx, dy);
+    if (!Number.isFinite(dist) || dist < 1e-3) return null;
+    const desiredDist = ALIGN_SIZE * 0.35;
+    const scale = desiredDist / dist;
+    const centerX = (lx + rx) / 2;
+    const centerY = (ly + ry) / 2;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = ALIGN_SIZE;
+    canvas.height = ALIGN_SIZE;
+    const ctx = canvas.getContext('2d');
+    ctx.translate(ALIGN_SIZE / 2, ALIGN_SIZE / 2);
+    ctx.scale(scale, scale);
+    ctx.rotate(-angle);
+    ctx.translate(-centerX, -centerY);
+    ctx.drawImage(source, 0, 0, source.videoWidth, source.videoHeight);
+    return canvas;
+}
+
+async function getFaceEmbedding(alignedCanvas) {
+    if (!imageEmbedder || !alignedCanvas) return null;
+    try {
+        let result;
+        if (imageEmbedder.embedForVideo) {
+            result = imageEmbedder.embedForVideo(alignedCanvas, nextEmbedTimestamp());
+        } else if (imageEmbedder.embed) {
+            result = imageEmbedder.embed(alignedCanvas);
+        } else {
+            return null;
+        }
+        const emb = result?.embeddings?.[0]?.floatEmbedding;
+        if (!emb) return null;
+        return new Float32Array(emb);
+    } catch (e) {
+        console.error('Embedding error:', e);
+        return null;
+    }
+}
+
+function cosineSimilarity(a, b) {
+    let dot = 0, na = 0, nb = 0;
+    for (let i = 0; i < a.length; i++) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    const denom = Math.sqrt(na) * Math.sqrt(nb);
+    return denom === 0 ? 0 : dot / denom;
+}
+
+function recognizeFace(embedding) {
+    if (!storedFaces.length) return null;
+    let best = null, bestScore = -1;
+    for (const f of storedFaces) {
+        const score = cosineSimilarity(embedding, new Float32Array(f.embedding));
+        if (score > bestScore) {
+            bestScore = score;
+            best = f;
+        }
+    }
+    if (bestScore >= RECOGNITION_THRESHOLD) {
+        return { name: best.name, similarity: bestScore, id: best.id };
+    }
+    return null;
+}
+
+function getTransform() {
+    const scale = Math.max(overlay.width / video.videoWidth, overlay.height / video.videoHeight);
+    const offsetX = (video.videoWidth * scale - overlay.width) / 2;
+    const offsetY = (video.videoHeight * scale - overlay.height) / 2;
+    return { scale, offsetX, offsetY };
+}
+function toCanvasRect([vx, vy, vw, vh]) {
+    const { scale, offsetX, offsetY } = getTransform();
+    return [vx * scale - offsetX, vy * scale - offsetY, vw * scale, vh * scale];
+}
+function toCanvasPoint(vx, vy) {
+    const { scale, offsetX, offsetY } = getTransform();
+    return [vx * scale - offsetX, vy * scale - offsetY];
+}
+
+function resizeOverlay() {
+    overlay.width = video.clientWidth;
+    overlay.height = video.clientHeight;
+}
+window.addEventListener('resize', resizeOverlay);
+
+function adjustKeyboard() {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const offset = Math.max(0, window.innerHeight - (vv.offsetTop + vv.height));
+    const shift = offset > 0 ? `translateY(-${offset}px)` : '';
+    askBar.style.transform = shift;
+    bridgeDebug.style.transform = shift;
+}
+
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', adjustKeyboard);
+    window.visualViewport.addEventListener('scroll', adjustKeyboard);
+}
+askInput.addEventListener('focus', adjustKeyboard);
+askInput.addEventListener('blur', () => {
+    askBar.style.transform = '';
+    bridgeDebug.style.transform = '';
+    setTimeout(adjustKeyboard, 100);
+});
+
+function iou(a, b) {
+    const [ax, ay, aw, ah] = a, [bx, by, bw, bh] = b;
+    const x1 = Math.max(ax, bx), y1 = Math.max(ay, by);
+    const x2 = Math.min(ax + aw, bx + bw), y2 = Math.min(ay + ah, by + bh);
+    const interW = Math.max(0, x2 - x1), interH = Math.max(0, y2 - y1);
+    const interArea = interW * interH;
+    const unionArea = aw * ah + bw * bh - interArea;
+    return unionArea <= 0 ? 0 : interArea / unionArea;
+}
+
+function updateTracks(detections, ranFace) {
+    const assigned = new Set();
+
+    detections.forEach((det) => {
+        let bestScore = 0, bestIdx = -1;
+        tracks.forEach((t, i) => {
+            if (assigned.has(i) || t.class !== det.class) return;
+            const iouScore = iou(t.box, det.box);
+            if (iouScore < IOU_MATCH_THRESHOLD) return;
+            const [tcx, tcy] = [t.box[0] + t.box[2] / 2, t.box[1] + t.box[3] / 2];
+            const [dcx, dcy] = [det.box[0] + det.box[2] / 2, det.box[1] + det.box[3] / 2];
+            const dist = Math.hypot(tcx - dcx, tcy - dcy);
+            const maxDim = Math.max(video.videoWidth, video.videoHeight);
+            const distScore = 1 - Math.min(dist / maxDim, 1);
+            const score = iouScore * 0.7 + distScore * 0.3;
+            if (score > bestScore) { bestScore = score; bestIdx = i; }
+        });
+
+        if (bestIdx !== -1) {
+            const t = tracks[bestIdx];
+            t.box = det.box;
+            t.score = det.score;
+            t.landmarks = det.landmarks;
+            t.expression = det.expression;
+            t.lastSeen = 0;
+            assigned.add(bestIdx);
+        } else {
+            tracks.push({
+                id: nextTrackId++,
+                class: det.class,
+                box: det.box,
+                score: det.score,
+                landmarks: det.landmarks,
+                expression: det.expression,
+                lastSeen: 0
+            });
+        }
+    });
+
+    tracks.forEach((t, i) => {
+        if (assigned.has(i)) return;
+        const isFaceTrack = t.class === 'face';
+        if (isFaceTrack === ranFace) t.lastSeen++;
+    });
+
+    tracks = tracks.filter((t) => t.lastSeen <= MAX_LOST_FRAMES);
+}
+
+function drawTracks(currentTarget) {
+    overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+    tracks.forEach((t) => {
+        if (t.lastSeen > 0) return;
+        const [x, y, w, h] = toCanvasRect(t.box);
+        const isLocked = t.id === lockedId;
+        const isTarget = t === currentTarget;
+        const color = isLocked ? '#FFD600' : (t.class === 'face' ? '#FF3D9A' : '#00E5FF');
+        overlayCtx.strokeStyle = color;
+        overlayCtx.lineWidth = isLocked ? 3 : (isTarget ? 3 : 2);
+        overlayCtx.strokeRect(x, y, w, h);
+
+        if (t.class === 'face' && t.landmarks) {
+            overlayCtx.fillStyle = color;
+            for (const p of t.landmarks) {
+                const [px, py] = toCanvasPoint(p.x * video.videoWidth, p.y * video.videoHeight);
+                overlayCtx.fillRect(px - 0.75, py - 0.75, 1.5, 1.5);
+            }
+        }
+
+        const expr = t.expression ? ` (${t.expression})` : '';
+        const displayName = (t.class === 'face' && t.recognition)
+            ? `👤 ${t.recognition.name}`
+            : `${t.class} #${t.id}`;
+        const label = `${isLocked ? '🔒 ' : ''}${displayName} ${(t.score * 100).toFixed(0)}%${expr}`;
+        overlayCtx.font = '13px -apple-system, sans-serif';
+        const textW = overlayCtx.measureText(label).width;
+        overlayCtx.fillStyle = color;
+        overlayCtx.fillRect(x, Math.max(0, y - 18), textW + 10, 18);
+        overlayCtx.fillStyle = '#000';
+        overlayCtx.fillText(label, x + 5, Math.max(12, y - 5));
+    });
+}
+
+function getCurrentTarget() {
+    const live = tracks.filter((t) => t.lastSeen === 0);
+    if (live.length === 0) return null;
+
+    if (lockedId !== null) {
+        const locked = live.find((t) => t.id === lockedId);
+        if (locked) return locked;
+        lockedId = null;
+    }
+
+    return live.reduce((best, t) => {
+        const area = t.box[2] * t.box[3];
+        const bestArea = best.box[2] * best.box[3];
+        if (area > bestArea) return t;
+        if (area === bestArea && t.score > best.score) return t;
+        return best;
+    });
+}
+
+function quantizeZone(box) {
+    const [x, y, w, h] = box;
+    const cx = (x + w / 2) / video.videoWidth;
+    const cy = (y + h / 2) / video.videoHeight;
+    const col = cx < 1 / 3 ? 'left' : cx < 2 / 3 ? 'center' : 'right';
+    const row = cy < 1 / 3 ? 'top' : cy < 2 / 3 ? 'middle' : 'bottom';
+    if (row === 'middle' && col === 'center') return 'center';
+    return `${row}-${col}`;
+}
+
+function sizeDescriptor(box) {
+    const areaFrac = (box[2] * box[3]) / (video.videoWidth * video.videoHeight);
+    if (areaFrac > 0.35) return 'close';
+    if (areaFrac > 0.1) return 'medium distance';
+    return 'far';
+}
+
+function buildSceneState() {
+    const live = tracks.filter((t) => t.lastSeen === 0);
+    const target = getCurrentTarget();
+
+    if (live.length === 0) {
+        return { text: 'Nothing currently detected in view.', target: null };
+    }
+
+    const lines = live.map((t) => {
+        const marker = t === target ? ' [TARGET]' : '';
+        const lockMarker = t.id === lockedId ? ' [LOCKED BY USER]' : '';
+        const exprPart = t.expression ? `, appears ${t.expression}` : '';
+        const recogPart = t.recognition ? `, recognized as ${t.recognition.name}` : '';
+        return `${t.class} #${t.id} (${quantizeZone(t.box)}, ${sizeDescriptor(t.box)}, ${(t.score * 100).toFixed(0)}% confidence${exprPart}${recogPart})${marker}${lockMarker}`;
+    });
+
+    return {
+        text: `Current scene:\n${lines.join('\n')}`,
+        target
+    };
+}
+
+function drawTargetPreview(target) {
+    if (!target) {
+        targetPreview.classList.remove('active');
+        targetLabel.classList.remove('active');
+        return;
+    }
+    const { px, py, pw, ph } = getCropRect(target.box);
+
+    targetPreviewCtx.clearRect(0, 0, 80, 80);
+    targetPreviewCtx.drawImage(video, px, py, pw, ph, 0, 0, 80, 80);
+    targetPreview.classList.add('active');
+
+    const name = target.recognition?.name;
+    targetLabel.textContent = `${lockedId === target.id ? '🔒 locked' : 'auto-target'}: ${name || target.class + ' #' + target.id}`;
+    targetLabel.classList.add('active');
+}
+
+function updateSaveButton() {
+    const locked = tracks.find((t) => t.id === lockedId && t.lastSeen === 0);
+    if (locked && locked.class === 'face') {
+        saveFaceBtn.classList.add('active');
+        saveFaceBtn.disabled = !faceDB;
+        saveFaceBtn.title = faceDB ? '' : 'Face storage unavailable in this browser';
+    } else {
+        saveFaceBtn.classList.remove('active');
+    }
+}
+
+overlay.addEventListener('click', (e) => {
+    const rect = overlay.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const hits = tracks.filter((t) => {
+        if (t.lastSeen > 0) return false;
+        const [bx, by, bw, bh] = toCanvasRect(t.box);
+        return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+    });
+
+    if (hits.length === 0) {
+        lockedId = null;
+        return;
+    }
+
+    const hit = hits.reduce((best, t) => {
+        const tIsFace = t.class === 'face';
+        const bestIsFace = best.class === 'face';
+        if (tIsFace && !bestIsFace) return t;
+        if (bestIsFace && !tIsFace) return best;
+        const area = t.box[2] * t.box[3];
+        const bestArea = best.box[2] * best.box[3];
+        return area < bestArea ? t : best;
+    });
+
+    lockedId = (lockedId === hit.id) ? null : hit.id;
+});
+
+async function handleAsk() {
+    const question = askInput.value.trim();
+    if (!question) return;
+
+    const lookbackSec = parseInt(lookbackSelect.value, 10) || 0;
+
+    askBtn.disabled = true;
+    askBtn.textContent = '…';
+    statusEl.textContent = lookbackSec > 0 ? `Asking VLM (${lookbackSec}s clip)…` : 'Asking VLM…';
+
+    let vlmDesc = '[VLM not called]';
+    let targetDesc = 'none — whole frame';
+    let sceneText = '';
+
+    try {
+        if (lookbackSec === 0) {
+            const scene = buildSceneState();
+            const target = scene.target;
+            drawTargetPreview(target);
+            const imageBase64 = captureCurrentFrame(target?.box ?? null);
+            vlmDesc = await queryVLM(imageBase64, question);
+            targetDesc = target
+                ? `${target.class} #${target.id} (${quantizeZone(target.box)}, ${sizeDescriptor(target.box)})`
+                : 'none — whole frame';
+            sceneText = scene.text;
+        } else {
+            const frames = getClip(lookbackSec);
+            if (frames.length === 0) {
+                vlmDesc = '[No buffered frames for that window yet]';
+            } else {
+                vlmDesc = await queryVLMClip(frames, question);
+            }
+            targetDesc = `clip: last ${lookbackSec}s (${frames.length} frames)`;
+            sceneText = buildSceneState().text;
+        }
+    } catch (err) {
+        console.error('VLM error:', err);
+        vlmDesc = `[VLM error: ${err.message}]`;
+    }
+
+    const payload =
+`[VLM call — ${targetDesc}]
+[VLM description: ${vlmDesc}]
+
+${sceneText}
+
+User question: "${question}"
+
+[This full block → Stef]`;
+
+    bridgeText.textContent = payload;
+    bridgeDebug.classList.add('active');
+
+    askBtn.disabled = false;
+    askBtn.textContent = 'Ask';
+    askInput.value = '';
+    askInput.blur();
+    statusEl.textContent = 'Live';
+}
+askBtn.addEventListener('click', handleAsk);
+askInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAsk(); });
+
+bridgeClose.addEventListener('click', (e) => {
+    e.stopPropagation();
+    bridgeDebug.classList.remove('active');
+});
+
+boostBtn.addEventListener('click', () => {
+    boostOn = !boostOn;
+    boostBtn.classList.toggle('active', boostOn);
+    boostBtn.textContent = boostOn ? 'Boost ON' : 'Moon';
+});
+
+async function handleSaveFace() {
+    const locked = tracks.find((t) => t.id === lockedId && t.lastSeen === 0);
+    if (!locked || locked.class !== 'face' || !locked.landmarks) {
+        statusEl.textContent = 'Lock a face first';
+        return;
+    }
+    if (!faceDB) {
+        statusEl.textContent = 'Face storage unavailable in this browser';
+        return;
+    }
+    statusEl.textContent = 'Computing embedding…';
+    const aligned = alignFaceFromLandmarks(video, locked.landmarks);
+    if (!aligned) {
+        statusEl.textContent = 'Could not align face — try again';
+        return;
+    }
+    const embedding = await getFaceEmbedding(aligned);
+    if (!embedding) {
+        statusEl.textContent = 'Embedding failed';
+        return;
+    }
+    pendingSave = { track: locked, alignedCanvas: aligned, embedding };
+    const previewCtx = namePreview.getContext('2d');
+    previewCtx.clearRect(0, 0, 112, 112);
+    previewCtx.drawImage(aligned, 0, 0, 112, 112);
+    nameError.textContent = '';
+    nameModal.classList.add('active');
+    nameInput.value = '';
+    nameInput.focus();
+}
+
+async function handleNameConfirm() {
+    const name = nameInput.value.trim();
+    if (!name || !pendingSave) return;
+
+    nameConfirm.disabled = true;
+    nameCancel.disabled = true;
+    nameError.textContent = '';
+    const originalLabel = nameConfirm.textContent;
+    nameConfirm.textContent = 'Saving…';
+
+    const thumbnail = pendingSave.alignedCanvas.toDataURL('image/jpeg', 0.85);
+    const ok = await saveFaceRecord(name, pendingSave.embedding, thumbnail);
+
+    nameConfirm.disabled = false;
+    nameCancel.disabled = false;
+    nameConfirm.textContent = originalLabel;
+
+    if (!ok) {
+        nameError.textContent = 'Save failed — try again.';
+        statusEl.textContent = 'Save failed — face not stored';
+        return;
+    }
+
+    pendingSave.track.recognition = { name, similarity: 1.0 };
+    pendingSave = null;
+    nameModal.classList.remove('active');
+    statusEl.textContent = `Saved face: ${name}`;
+}
+
+saveFaceBtn.addEventListener('click', handleSaveFace);
+nameConfirm.addEventListener('click', handleNameConfirm);
+nameCancel.addEventListener('click', () => {
+    pendingSave = null;
+    nameError.textContent = '';
+    nameModal.classList.remove('active');
+});
+nameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleNameConfirm();
+});
+
+async function detectLoop() {
+    if (!running) return;
+
+    if (video.readyState < 2 || video.videoWidth === 0) {
+        requestAnimationFrame(detectLoop);
+        return;
+    }
+
+    const ts = performance.now();
+    const detections = [];
+    const runFace = frameCount % 2 === 1;
+    frameCount++;
+    const inferenceStart = performance.now();
+
+    let source = video;
+    if (boostOn) {
+        if (boostCanvas.width !== video.videoWidth || boostCanvas.height !== video.videoHeight) {
+            boostCanvas.width = video.videoWidth;
+            boostCanvas.height = video.videoHeight;
+        }
+        boostCtx.filter = 'brightness(1.4) contrast(1.2)';
+        boostCtx.drawImage(video, 0, 0, boostCanvas.width, boostCanvas.height);
+        boostCtx.filter = 'none';
+        source = boostCanvas;
+    }
+
+    try {
+        if (!runFace) {
+            const objResult = objectDetector.detectForVideo(source, ts);
+            objResult.detections.forEach((d) => {
+                const cat = d.categories[0];
+                if (cat.score < MIN_SCORE) return;
+                const bb = d.boundingBox;
+                detections.push({
+                    class: cat.categoryName,
+                    score: cat.score,
+                    box: [bb.originX, bb.originY, bb.width, bb.height]
+                });
+            });
+        } else {
+            const faceResult = faceLandmarker.detectForVideo(source, ts);
+            faceResult.faceLandmarks.forEach((landmarks, i) => {
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                for (const p of landmarks) {
+                    const px = p.x * video.videoWidth;
+                    const py = p.y * video.videoHeight;
+                    if (px < minX) minX = px;
+                    if (px > maxX) maxX = px;
+                    if (py < minY) minY = py;
+                    if (py > maxY) maxY = py;
+                }
+                const score = 1;
+                let expression = null;
+                const shapes = faceResult.faceBlendshapes?.[i]?.categories;
+                if (shapes) {
+                    const top = shapes
+                        .filter((c) => c.categoryName !== '_neutral')
+                        .reduce((best, c) => (c.score > (best?.score ?? 0) ? c : best), null);
+                    if (top && top.score > 0.5) expression = top.categoryName;
+                }
+
+                detections.push({
+                    class: 'face',
+                    score,
+                    box: [minX, minY, maxX - minX, maxY - minY],
+                    landmarks,
+                    expression
+                });
+            });
+        }
+
+        const inferenceMs = (performance.now() - inferenceStart).toFixed(0);
+        statusEl.textContent = `Live — ${runFace ? 'face' : 'object'} model: ${inferenceMs}ms${boostOn ? ' +boost' : ''}`;
+
+        updateTracks(detections, runFace);
+
+        if (runFace && storedFaces.length > 0) {
+            const faceTracks = tracks.filter((t) => t.class === 'face' && t.lastSeen === 0);
+            let processed = 0;
+            for (const t of faceTracks) {
+                const cache = recognitionCache.get(t.id);
+                if (cache && frameCount - cache.frameCount < 10) {
+                    t.recognition = cache.recognition;
+                    continue;
+                }
+                if (processed >= 2) continue;
+                if (t.landmarks) {
+                    const aligned = alignFaceFromLandmarks(video, t.landmarks);
+                    if (aligned) {
+                        const embedding = await getFaceEmbedding(aligned);
+                        if (embedding) {
+                            const match = recognizeFace(embedding);
+                            t.recognition = match;
+                            recognitionCache.set(t.id, { recognition: match, frameCount });
+                        }
+                    }
+                    processed++;
+                }
+            }
+            for (const [id, data] of recognitionCache) {
+                if (frameCount - data.frameCount > 30) recognitionCache.delete(id);
+            }
+        }
+
+        const currentTarget = getCurrentTarget();
+        drawTracks(currentTarget);
+        drawTargetPreview(currentTarget);
+        updateSaveButton();
+        tickFps();
+    } catch (err) {
+        console.error('Detect error:', err);
+        statusEl.textContent = 'Error: ' + err.message;
+    }
+
+    requestAnimationFrame(detectLoop);
+}
+
+async function createWithGpuFallback(createFn, options) {
+    try {
+        return await createFn({ ...options, baseOptions: { ...options.baseOptions, delegate: 'GPU' } });
+    } catch (e) {
+        console.warn('GPU delegate failed, falling back to CPU:', e);
+        return await createFn({ ...options, baseOptions: { ...options.baseOptions, delegate: 'CPU' } });
+    }
+}
+
+async function loadModels() {
+    statusEl.textContent = 'Loading models…';
+    const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm"
+    );
+
+    const [obj, face, embedder] = await Promise.all([
+        createWithGpuFallback(
+            (opts) => ObjectDetector.createFromOptions(vision, opts),
+            {
+                baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite" },
+                runningMode: "VIDEO",
+                scoreThreshold: MIN_SCORE,
+                maxResults: 10
+            }
+        ),
+        createWithGpuFallback(
+            (opts) => FaceLandmarker.createFromOptions(vision, opts),
+            {
+                baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task" },
+                runningMode: "VIDEO",
+                numFaces: 5,
+                minFaceDetectionConfidence: MIN_SCORE,
+                minFacePresenceConfidence: MIN_SCORE,
+                minTrackingConfidence: MIN_SCORE,
+                outputFaceBlendshapes: true,
+                outputFacialTransformationMatrixes: false
+            }
+        ),
+        createWithGpuFallback(
+            (opts) => ImageEmbedder.createFromOptions(vision, opts),
+            {
+                baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/image_embedder/mobilenet_v3_small/float32/1/mobilenet_v3_small.tflite" },
+                runningMode: "VIDEO",
+                quantize: false
+            }
+        )
+    ]);
+    objectDetector = obj;
+    faceLandmarker = face;
+    imageEmbedder = embedder;
+
+    statusEl.textContent = 'Live';
+}
+
+async function start() {
+    startOverlay.classList.add('hidden');
+    statusEl.textContent = 'Starting camera…';
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false
+    });
+    video.srcObject = stream;
+
+    await new Promise((resolve) => {
+        video.addEventListener('loadedmetadata', () => { video.play(); resolve(); }, { once: true });
+    });
+
+    resizeOverlay();
+    startRingBuffer();
+
+    try {
+        faceDB = await openFaceDB();
+        await loadStoredFaces();
+    } catch (e) {
+        console.error('Face DB error:', e);
+        faceDB = null;
+    }
+
+    try {
+        await loadModels();
+    } catch (e) {
+        console.error('Model load error:', e);
+        statusEl.textContent = 'Failed to load models — check connection and reload';
+        return;
+    }
+
+    running = true;
+    requestAnimationFrame(detectLoop);
+}
+
+startBtn.addEventListener('click', () => {
+    start().catch((err) => {
+        console.error(err);
+        statusEl.textContent = 'Error: ' + err.message;
+        startOverlay.classList.remove('hidden');
+    });
+});
+</script>
+</body>
+</html>
