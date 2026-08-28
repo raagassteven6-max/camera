@@ -1261,6 +1261,42 @@ startBtn.addEventListener('click', () => {
         startOverlay.classList.remove('hidden');
     });
 });
+
+// ---- Stef Bridge (HUD side) ----
+const stefChannel = new BroadcastChannel('stef_bridge');
+
+stefChannel.onmessage = async (event) => {
+  const { id, type, payload } = event.data;
+  if (type !== 'get_visual_context') return;
+
+  const { seconds_back, question } = payload;
+  statusEl.textContent = `Stef asked: "${question}" (${seconds_back}s clip)`;
+
+  try {
+    const frames = getClip(seconds_back);
+    if (frames.length === 0) {
+      stefChannel.postMessage({
+        id,
+        type: 'vlm_result',
+        payload: { description: '[No buffered frames yet]', frames: [] }
+      });
+      return;
+    }
+
+    const description = await queryVLMClip(frames, question);
+    stefChannel.postMessage({
+      id,
+      type: 'vlm_result',
+      payload: { description, frames: frames.map(f => f.dataUrl) }
+    });
+  } catch (err) {
+    stefChannel.postMessage({
+      id,
+      type: 'vlm_result',
+      payload: { description: '[VLM error: ' + err.message + ']', frames: [] }
+    });
+  }
+};
 </script>
 </body>
 </html>
